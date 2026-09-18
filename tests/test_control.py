@@ -1,6 +1,7 @@
 """answer_prompt / interrupt / restart_terminal against a mocked tmux."""
 
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from maestro import fleet as fleet_mod
@@ -48,7 +49,8 @@ class ControlTests(unittest.TestCase):
         self.tmux["send_literal"].assert_not_called()
 
     def test_answer_key_token_is_sent_as_key(self):
-        for token, key in (("enter", "Enter"), ("ESCAPE", "Escape"), ("Down", "Down"), ("space", "Space")):
+        # Escape is the exception (it ends the turn), covered separately below.
+        for token, key in (("enter", "Enter"), ("Down", "Down"), ("space", "Space")):
             f, term = make_fleet("waiting_user_answer")
             self.tmux["send_key"].reset_mock()
             f.answer_prompt("abcd1234", token)
@@ -78,9 +80,79 @@ class ControlTests(unittest.TestCase):
         f, term = make_fleet("processing")
         term.dispatched, term.dispatch_at = True, 123.0
         f.interrupt("abcd1234")
-        self.assertEqual(self.tmux["send_key"].call_args_list[0], mock.call("%1", "Escape"))
-        self.assertTrue(all(c.args[1] == "Escape" for c in self.tmux["send_key"].call_args_list))
+        # One Escape: the (mocked) screen no longer shows a spinner afterwards.
+        self.assertEqual(self.tmux["send_key"].call_args_list, [mock.call("%1", "Escape")])
         self.assertFalse(term.dispatched)
+
+    def test_interrupt_repeats_escape_while_still_processing(self):
+        f, _ = make_fleet("processing")
+        tmux.capture.return_value = "✻ Cooking… (3s · ↑ 12 tokens)\n"
+        f.interrupt("abcd1234")
+        self.assertEqual(self.tmux["send_key"].call_args_list, [mock.call("%1", "Escape")] * 2)
+
+    def test_interrupt_refused_on_idle_prompt(self):
+        # A second Escape on an idle prompt opens the Rewind menu; refuse instead.
+        for status in ("idle", "completed", "unknown", "error"):
+            f, _ = make_fleet(status)
+            with self.assertRaisesRegex(ValueError, status):
+                f.interrupt("abcd1234")
+        self.tmux["send_key"].assert_not_called()
+
+    def test_answer_escape_clears_dispatch(self):
+        f, term = make_fleet("waiting_user_answer")
+        term.dispatched, term.dispatch_at = True, 123.0
+        f.answer_prompt("abcd1234", "escape")
+        self.tmux["send_key"].assert_called_once_with("%1", "Escape")
+        self.assertFalse(term.dispatched)
+
+    def test_rewind_menu_is_dismissed_by_the_watch_loop(self):
+        f, term = make_fleet("idle")
+        tmux.capture.return_value = (Path(__file__).parent / "fixtures" / "rewind_dialog.txt").read_text(encoding="utf-8")
+        with mock.patch.object(tmux, "pane_alive", return_value=True):
+            f._observe(term)
+        self.tmux["send_key"].assert_called_once_with("%1", "Escape")
+        self.assertEqual(term.status, "idle")  # untouched: the tick is skipped
+
+    def test_restart_failure_keeps_the_terminal(self):
+        f, term = make_fleet("error")
+        term.failed = "claude exited"
+        with mock.patch.object(Fleet, "_open_window", side_effect=tmux.TmuxError("no tmux")), \
+             mock.patch.object(fleet_mod.profiles, "load") as load:
+            load.return_value.name = "worker"
+            with self.assertRaises(tmux.TmuxError):
+                f.restart_terminal("abcd1234")
+        self.assertIn("abcd1234", f.terminals)
+        self.assertEqual(term.status, "error")
+        self.assertFalse(term.restarting)
+
+    def test_restart_reminds_a_worker_of_its_caller(self):
+        f, term = make_fleet("error")
+        term.failed = "claude exited"
+        term.inbox.append({"message": "queued earlier", "sender_id": None, "orchestration_type": None})
+        with mock.patch.object(Fleet, "_start"), \
+             mock.patch.object(fleet_mod.profiles, "load") as load, \
+             mock.patch.object(fleet_mod.events.log, "emit"):
+            load.return_value.name = "worker"
+            f.restart_terminal("abcd1234")
+        self.assertIn("caller01", term.inbox[0]["message"])
+        self.assertEqual(term.inbox[1]["message"], "queued earlier")
+
+    def test_restart_refused_while_starting(self):
+        f, term = make_fleet("unknown")
+        term.ready = False
+        with self.assertRaisesRegex(ValueError, "still starting"):
+            f.restart_terminal("abcd1234")
+        self.tmux["kill_window"].assert_not_called()
+
+    def test_queued_message_survives_a_failed_paste(self):
+        f, term = make_fleet("idle")
+        term.inbox.append({"message": "later", "sender_id": None, "orchestration_type": None})
+        tmux.capture.return_value = (Path(__file__).parent / "fixtures" / "worker2_completed.txt").read_text(encoding="utf-8")
+        self.tmux["send_text"].side_effect = tmux.TmuxError("pane gone")
+        with mock.patch.object(tmux, "pane_alive", return_value=True), \
+             mock.patch.object(fleet_mod.events.log, "emit"):
+            f._observe(term)
+        self.assertEqual(len(term.inbox), 1)
 
     def test_restart_keeps_id_and_restarts(self):
         f, term = make_fleet("error")
@@ -97,7 +169,9 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(term.pane, "%9")
         self.assertEqual(term.name, "worker-abcd")
         self.assertEqual((term.model, term.cwd, term.caller_id), ("sonnet", "/tmp", "caller01"))
-        self.assertEqual(len(term.inbox), 1)
+        # The queued message survives, behind the "you were restarted" reminder.
+        self.assertEqual([m["message"] for m in term.inbox][-1], "later")
+        self.assertEqual(len(term.inbox), 2)
         self.assertFalse(term.ready)
         self.assertFalse(term.dispatched)
         self.assertEqual(term.status, "unknown")

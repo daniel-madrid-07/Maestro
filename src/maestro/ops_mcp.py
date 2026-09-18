@@ -61,7 +61,8 @@ def launch_session(
     result's ``worktree`` gives its path and branch. The worker is told to
     commit there. Merge it yourself with plain git afterwards
     (``git -C <repo> merge mx/<terminal_id>``). Deleting the terminal removes
-    the checkout; the branch is kept when it has unmerged commits.
+    the checkout after committing anything left uncommitted on the branch; the
+    branch is kept when it has commits the repo's HEAD lacks.
     """
     try:
         term = request(
@@ -168,18 +169,27 @@ def list_worktrees() -> dict[str, Any]:
     """Every live terminal that runs in its own git worktree: what there is to merge.
 
     Each entry has terminal_id, status, repo, path and branch. Merge a finished
-    one with ``git -C <repo> merge <branch>``; deleting the terminal removes the
-    checkout and keeps the branch when it still has unmerged commits.
+    one with ``git -C <repo> merge <branch>``; deleting the terminal commits any
+    leftovers on the branch, removes the checkout and keeps the branch when it
+    has commits the repo's HEAD lacks.
+    ``orphaned`` lists checkouts whose terminal died with an earlier server;
+    they are never removed on their own — merge what you want, then
+    ``remove_worktree``.
     """
     try:
-        out = []
-        for s in request("GET", "/sessions"):
-            for t in request("GET", f"/sessions/{s['name']}/terminals"):
-                if t.get("worktree"):
-                    out.append({"terminal_id": t["id"], "session_name": t["session_name"], "status": t["status"], **t["worktree"]})
-        return {"success": True, "worktrees": out}
+        data = request("GET", "/worktrees")
+        return {"success": True, "worktrees": data["live"], "orphaned": data["orphaned"]}
     except ApiError as exc:
         return _fail("List worktrees", exc)
+
+
+@mcp.tool()
+def remove_worktree(terminal_id: str) -> dict[str, Any]:
+    """Remove an orphaned checkout listed by list_worktrees (leftovers are committed first; the branch stays if unmerged)."""
+    try:
+        return request("DELETE", f"/worktrees/{terminal_id}", timeout=60)
+    except ApiError as exc:
+        return _fail("Remove worktree", exc)
 
 
 @mcp.tool()
@@ -197,7 +207,9 @@ def answer_prompt(terminal_id: str, answer: str) -> dict[str, Any]:
 
     ``answer`` is a key (Enter, Escape, Up, Down, Tab, Space), a single digit
     (in an option dialog it selects and submits that option: ``"2"`` = the
-    second one), or text, which is typed and followed by Enter.
+    second one), or one line of text, typed and followed by Enter — only where
+    a text field has focus (an option list treats letters as hotkeys). Escape
+    cancels the question and ends the turn with no answer.
     """
     try:
         return request("POST", f"/terminals/{terminal_id}/answer", body={"answer": answer})
@@ -209,8 +221,10 @@ def answer_prompt(terminal_id: str, answer: str) -> dict[str, Any]:
 def interrupt(terminal_id: str) -> dict[str, Any]:
     """Stop a terminal's current turn (Escape), e.g. when a worker is going in circles.
 
-    Returns the status observed ~2 s later (normally idle or completed); queued
-    messages are then delivered as usual.
+    Only while its status is processing or waiting_user_answer (an idle prompt
+    has nothing to interrupt and is refused). Returns the status observed ~2 s
+    later (normally idle or completed); queued messages are then delivered as
+    usual.
     """
     try:
         return request("POST", f"/terminals/{terminal_id}/interrupt")

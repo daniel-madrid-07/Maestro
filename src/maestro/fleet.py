@@ -87,6 +87,7 @@ class Terminal:
     last_delivery: float = 0.0
     last_active: str = field(default_factory=now_iso)
     inbox: deque = field(default_factory=deque)
+    restarting: bool = False  # a failed start then keeps the terminal (status error)
     waiting_since: str | None = None
     screen_hash: str | None = None  # of the last processing screen (see screen_digest)
     screen_changed: float = 0.0
@@ -139,6 +140,9 @@ class Fleet:
         self._lock = threading.RLock()
         self.sessions: dict[str, Session] = {}
         self.terminals: dict[str, Terminal] = {}
+        # Worktrees whose terminal died with a previous server; never removed
+        # on their own (they may hold unmerged work), listed under /worktrees.
+        self.orphans: list[dict] = []
 
     # ------------------------------------------------------------ persistence
 
@@ -147,6 +151,7 @@ class Fleet:
             data = {
                 "sessions": [s.__dict__ for s in self.sessions.values()],
                 "terminals": [t.persisted() for t in self.terminals.values()],
+                "orphans": list(self.orphans),
             }
         config.ensure_dirs()
         tmp = config.STATE_FILE.with_suffix(".json.tmp")
@@ -162,6 +167,7 @@ class Fleet:
         except (OSError, json.JSONDecodeError):
             return
         live = set(tmux.list_sessions())
+        self.orphans = [o for o in data.get("orphans", []) if os.path.isdir(o.get("path", ""))]
         for s in data.get("sessions", []):
             session = Session(**s)
             if session.tmux in live:
@@ -173,7 +179,10 @@ class Fleet:
                 term.ready = True
                 term.dispatched = True  # its history is unknown; trust the screen
                 self.terminals[term.id] = term
-        log.info("restored %d session(s), %d terminal(s)", len(self.sessions), len(self.terminals))
+            elif wt and os.path.isdir(wt["path"]):
+                self.orphans.append({"terminal_id": term.id, "session_name": term.session, "agent_profile": term.agent_profile, **wt})
+                log.warning("terminal %s is gone; its worktree %s is kept as orphaned", term.id, wt["path"])
+        log.info("restored %d session(s), %d terminal(s), %d orphaned worktree(s)", len(self.sessions), len(self.terminals), len(self.orphans))
         self.save()
 
     # ------------------------------------------------------------ queries
@@ -263,17 +272,24 @@ class Fleet:
                 raise ValueError(f"working_directory does not exist: {cwd}")
             if caller_id and caller_id not in self.terminals:
                 raise ValueError(f"caller terminal '{caller_id}' not found")
-
             terminal_id = uuid.uuid4().hex[:8]
-            wt = None
-            if use_worktree:
-                wt = worktrees.create(cwd, terminal_id)
-                cwd = wt.path
-                if initial_message:
-                    initial_message += (
-                        f"\n\n[You are working in an isolated git worktree on branch {wt.branch} at {wt.path}. "
-                        "Commit your work on this branch before you report; the orchestrator merges it into the main branch.]"
-                    )
+
+        # Outside the lock: a checkout of a /mnt/c repository can take many
+        # seconds, and the watch loop must keep running meanwhile.
+        wt = None
+        if use_worktree:
+            wt = worktrees.create(cwd, terminal_id)
+            # Keep the caller's subdirectory, now inside the new checkout.
+            cwd = os.path.normpath(os.path.join(wt.path, os.path.relpath(cwd, wt.repo)))
+            if initial_message:
+                initial_message += (
+                    f"\n\n[You are working in an isolated git worktree on branch {wt.branch} at {wt.path}. "
+                    "Commit your work on this branch before you report; the orchestrator merges it into the main branch.]"
+                )
+
+        with self._lock:
+            if new_session and session_name in self.sessions:  # created meanwhile
+                session, new_session = self.sessions[session_name], False
             try:
                 pane, window = self._open_window(session, terminal_id, profile.name, cwd, new_session)
             except Exception:
@@ -358,6 +374,7 @@ class Fleet:
                 raise InitError(f"Claude Code showed no input box within {config.INIT_TIMEOUT:.0f}s")
             with self._lock:
                 term.ready = True
+                term.restarting = False
                 term.status = "idle"
                 term.last_active = now_iso()
             log.info("terminal %s (%s) ready in %s", term.id, term.agent_profile, term.session)
@@ -367,6 +384,13 @@ class Fleet:
             log.error("terminal %s failed to start: %s", term.id, exc)
             term.failed = str(exc)
             events.log.emit("terminal_error", term.id, term.session, agent_name=term.agent_profile, reason=str(exc))
+            if term.restarting:
+                # A restart that fails keeps the terminal (inbox, worktree, id)
+                # so the orchestrator can try again or read what happened.
+                with self._lock:
+                    term.restarting = False
+                    term.status = "error"
+                return
             try:
                 self.delete_terminal(term.id)
             except KeyError:
@@ -377,19 +401,29 @@ class Fleet:
     def send_input(self, terminal_id: str, text: str, sender_id=None, orchestration_type=None) -> None:
         """Paste ``text`` into the terminal now and mark a turn as dispatched."""
         term = self.get_terminal(terminal_id)
-        if not term.ready:
-            raise NotReady(f"terminal '{terminal_id}' is still starting")
-        self._mark_dispatched(term)
-        tmux.send_text(term.pane, text, config.PASTE_SUBMIT_DELAY)
+        with self._lock:
+            if not term.ready:
+                raise NotReady(f"terminal '{terminal_id}' is still starting")
+            # Pinned here: if a restart swaps the pane meanwhile, the paste goes
+            # to the dead one and fails, never into the new pane's bare shell.
+            pane = term.pane
+        self._mark_dispatched(term, pane)
+        tmux.send_text(pane, text, config.PASTE_SUBMIT_DELAY)
+        with self._lock:
+            # The paste itself took ~2 s; the grace period counts from the Enter.
+            term.dispatch_at = term.last_delivery = time.time()
         events.log.emit(
             "post_send_message", terminal_id, term.session,
             sender=sender_id, receiver=terminal_id,
             orchestration_type=orchestration_type or "send_message",
         )
 
-    def _mark_dispatched(self, term: Terminal) -> None:
-        """Remember the answer on screen now, so the loop can tell the next one apart."""
-        screen = tmux.capture(term.pane, 200)
+    def _mark_dispatched(self, term: Terminal, pane: str | None = None) -> None:
+        """Remember the answer on screen now, so the loop can tell the next one apart.
+
+        Same capture depth as ``_observe``: the counts are compared against it.
+        """
+        screen = tmux.capture(pane or term.pane, 60)
         with self._lock:
             term.snapshot_response = claude.last_response(screen)
             term.snapshot_count = claude.response_count(screen)
@@ -397,6 +431,7 @@ class Fleet:
             term.dispatch_at = time.time()
             term.last_delivery = term.dispatch_at
             term.status = "processing"
+            term.waiting_since, term.stuck, term.screen_hash = None, False, None
             term.last_active = now_iso()
 
     def queue_message(self, terminal_id: str, text: str, sender_id=None, orchestration_type=None) -> int:
@@ -432,8 +467,16 @@ class Fleet:
             raise ValueError(f"terminal '{terminal_id}' is not waiting for an answer (status {term.status})")
         if not answer:
             raise ValueError("answer is required")
-        self._mark_dispatched(term)
+        if "\n" in answer or "\r" in answer:
+            raise ValueError("answer must be a single line (a newline would submit halfway)")
         key = ANSWER_KEYS.get(answer.strip().lower())
+        if key == "Escape":
+            # Cancelling the question ends the turn without an answer; marking a
+            # dispatch would leave the loop waiting for one forever.
+            self._clear_dispatch(term)
+            tmux.send_key(term.pane, key)
+            return term
+        self._mark_dispatched(term)
         if key:
             tmux.send_key(term.pane, key)
         elif len(answer) == 1 and answer.isdigit():
@@ -444,19 +487,30 @@ class Fleet:
             tmux.send_key(term.pane, "Enter")
         return term
 
-    def interrupt(self, terminal_id: str) -> Terminal:
-        """Stop the current turn with Escape; return once the screen had ~2 s to settle."""
-        term = self.get_terminal(terminal_id)
-        if not term.ready:
-            raise NotReady(f"terminal '{terminal_id}' is still starting")
-        tmux.send_key(term.pane, "Escape")
-        time.sleep(0.3)
-        tmux.send_key(term.pane, "Escape")  # the first can be swallowed mid-render
+    def _clear_dispatch(self, term: Terminal) -> None:
         with self._lock:
             term.dispatched = False  # the interrupted turn will never produce an answer
             term.dispatch_at = 0.0
             term.last_active = now_iso()
-        time.sleep(INTERRUPT_SETTLE)
+
+    def interrupt(self, terminal_id: str) -> Terminal:
+        """Stop the current turn with Escape; return once the screen had ~2 s to settle.
+
+        Only while ``processing`` or ``waiting_user_answer``: on an idle prompt
+        Escape does nothing and a second one opens Claude's Rewind menu, which
+        would leave the terminal blocked (observed on Claude Code 2.1.276).
+        """
+        term = self.get_terminal(terminal_id)
+        if not term.ready:
+            raise NotReady(f"terminal '{terminal_id}' is still starting")
+        if term.status not in ("processing", "waiting_user_answer"):
+            raise ValueError(f"terminal '{terminal_id}' has nothing to interrupt (status {term.status})")
+        self._clear_dispatch(term)
+        tmux.send_key(term.pane, "Escape")
+        time.sleep(1.5)
+        if claude.detect_status(tmux.capture(term.pane, 40)) == "processing":
+            tmux.send_key(term.pane, "Escape")  # the first was swallowed mid-render
+            time.sleep(INTERRUPT_SETTLE)
         return term
 
     def restart_terminal(self, terminal_id: str, wait: bool = True) -> Terminal:
@@ -464,12 +518,21 @@ class Fleet:
         term = self.get_terminal(terminal_id)
         profile = profiles.load(term.agent_profile)
         with self._lock:
-            session = self.sessions[term.session]
+            if not term.ready and not term.failed:
+                raise ValueError(f"terminal '{terminal_id}' is still starting; wait for it")
+            session = self.sessions.get(term.session)
+            if session is None:
+                raise KeyError(f"session '{term.session}' of terminal '{terminal_id}' no longer exists")
             term.ready = False  # keeps the watch loop off the dying pane
+            term.restarting = True
             old_pane = term.pane
         tmux.kill_window(old_pane)
         with self._lock:
-            term.pane, term.name = self._open_window(session, term.id, profile.name, term.cwd, False)
+            try:
+                term.pane, term.name = self._open_window(session, term.id, profile.name, term.cwd, False)
+            except Exception as exc:
+                term.failed, term.status, term.restarting = f"restart failed: {exc}", "error", False
+                raise
             term.failed = None
             term.status = "unknown"
             term.dispatched = False
@@ -477,7 +540,20 @@ class Fleet:
             term.snapshot_response = None
             term.snapshot_count = 0
             term.last_delivery = 0.0
+            term.waiting_since, term.stuck, term.screen_hash = None, False, None
             term.last_active = now_iso()
+            # The new Claude knows nothing of the old conversation: re-tell it
+            # who to report to and where it works, ahead of anything queued.
+            reminders = []
+            if term.caller_id:
+                reminders.append(f"Terminal {term.caller_id} assigned your task; report to it with send_message (no receiver_id needed).")
+            if term.worktree:
+                reminders.append(f"You work in an isolated git worktree on branch {term.worktree.branch} at {term.worktree.path}; commit there before you report.")
+            if reminders:
+                term.inbox.appendleft({
+                    "message": "[Maestro: this terminal was restarted and its previous conversation is gone. " + " ".join(reminders) + "]",
+                    "sender_id": None, "orchestration_type": "restart",
+                })
         self.save()
         events.log.emit("terminal_restarted", term.id, term.session, agent_name=term.agent_profile, old_pane=old_pane, pane=term.pane)
         self._start(term, profile, wait)
@@ -500,7 +576,32 @@ class Fleet:
         result = {"success": True, "terminal_id": terminal_id}
         if term.worktree:
             result["worktree"] = {**term.worktree.public(), **worktrees.remove(term.worktree)}
+            claude.forget_trusted(term.cwd)  # one-off checkout; no trust entry left behind
         return result
+
+    # ------------------------------------------------------------ worktrees
+
+    def worktrees_report(self) -> dict:
+        """Live worktree terminals plus checkouts orphaned by a server restart."""
+        with self._lock:
+            live = [
+                {"terminal_id": t.id, "session_name": t.session, "status": t.status, **t.worktree.public()}
+                for t in self.terminals.values() if t.worktree
+            ]
+            return {"live": live, "orphaned": list(self.orphans)}
+
+    def remove_orphan(self, terminal_id: str) -> dict:
+        with self._lock:
+            orphan = next((o for o in self.orphans if o["terminal_id"] == terminal_id), None)
+            if orphan is None:
+                raise KeyError(f"no orphaned worktree for terminal '{terminal_id}'")
+        wt = worktrees.Worktree(repo=orphan["repo"], path=orphan["path"], branch=orphan["branch"])
+        res = worktrees.remove(wt)
+        claude.forget_trusted(wt.path)
+        with self._lock:
+            self.orphans = [o for o in self.orphans if o["terminal_id"] != terminal_id]
+        self.save()
+        return {"success": res["removed"], "terminal_id": terminal_id, "worktree": {**wt.public(), **res}}
 
     def _kill_session(self, name: str) -> None:
         with self._lock:
@@ -550,6 +651,10 @@ class Fleet:
                 pass
             return
         screen = tmux.capture(term.pane, 60)
+        if claude.REWIND in "\n".join(claude.rows_of(screen)[-20:]):
+            log.info("terminal %s: dismissing the Rewind menu", term.id)
+            tmux.send_key(term.pane, "Escape")
+            return
         raw = claude.detect_status(screen)
         now = time.time()
         if term.dispatched and now - term.dispatch_at < DISPATCH_GRACE:
@@ -581,11 +686,17 @@ class Fleet:
                     term.waiting_since = None
             self._check_stuck(term, status, screen, now)
             deliver = (
-                term.inbox and status in READY_STATES and now - term.last_delivery > DELIVERY_GAP
+                term.inbox and term.ready and status in READY_STATES
+                and now - term.last_delivery > DELIVERY_GAP
             )
             msg = term.inbox.popleft() if deliver else None
         if msg:
-            self.send_input(term.id, msg["message"], msg["sender_id"], msg["orchestration_type"])
+            try:
+                self.send_input(term.id, msg["message"], msg["sender_id"], msg["orchestration_type"])
+            except (NotReady, tmux.TmuxError) as exc:
+                with self._lock:
+                    term.inbox.appendleft(msg)  # the pane went away under us; next tick retries
+                log.warning("terminal %s: delivery deferred: %s", term.id, exc)
 
     def _check_stuck(self, term: Terminal, status: str, screen: str, now: float) -> None:
         """Report a processing pane whose screen has not moved for STUCK_AFTER, once."""

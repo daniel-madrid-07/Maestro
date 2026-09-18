@@ -14,6 +14,7 @@ existing panel works unchanged:
     POST   /terminals/{id}/restart
     GET    /events   (SSE)                GET /events/history?limit=
     GET    /agents/profiles               GET /agents/profiles/{name}
+    GET    /worktrees                     DELETE /worktrees/{terminal_id}   (orphaned checkouts)
 """
 
 import json
@@ -50,6 +51,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # the access log is noise
         pass
+
+    def handle_error(self, request, client_address):  # noqa: D401 - stdlib hook
+        """Silence the traceback the stdlib prints when a keep-alive client
+        drops the socket between requests; anything else stays loud."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
 
     def _json(self, code: int, payload) -> None:
         body = json.dumps(payload).encode()
@@ -168,6 +177,12 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return self._json(201, term.public())
 
+        if head == "worktrees":
+            if len(segs) == 1 and method == "GET":
+                return self._json(200, fleet.worktrees_report())
+            if len(segs) == 2 and method == "DELETE":
+                return self._json(200, fleet.remove_orphan(segs[1]))
+
         if head == "terminals" and len(segs) >= 2:
             tid = segs[1]
             if len(segs) == 2:
@@ -175,6 +190,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, fleet.get_terminal(tid).public())
                 if method == "DELETE":
                     return self._json(200, fleet.delete_terminal(tid))
+                return None
             sub = segs[2]
             if sub == "output" and method == "GET":
                 mode = self._params().get("mode", "full")

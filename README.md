@@ -15,6 +15,27 @@ CAO hace en este equipo: solo Claude Code, solo tmux, solo lo que se usa.
 | `maestro-ops` | Servidor MCP para el orquestador externo (Claude en VS Code). Mismos nombres de herramientas que `cao-ops-mcp`: `launch_session`, `send_session_message`, `get_terminal_status`, `get_terminal_output`, `read_session_output`, `list_sessions`, `get_session_info`, `shutdown_session`, `list_profiles`. |
 | `maestro-agent` | Servidor MCP que recibe cada sesión lanzada: `assign` (worker sin esperar), `handoff` (worker esperando la respuesta), `send_message`, `list_terminals`, `delete_terminal`, `get_terminal_status`, `get_terminal_output`. |
 
+Los dos servidores MCP tienen además las **herramientas de control**:
+`answer_prompt(terminal_id, answer)` (solo con estado `waiting_user_answer`:
+una tecla, un dígito que elige esa opción, o texto), `interrupt(terminal_id)`
+(Esc, para un worker dando vueltas) y `restart_terminal(terminal_id)` (mismo
+id, perfil, modelo, carpeta y cola; Claude nuevo, conversación perdida).
+
+**Worktrees:** `use_worktree=true` en `launch_session`, `assign` o `handoff`
+da al worker su propio checkout en `~/.maestro/worktrees/<repo>-<id>` sobre la
+rama `mx/<id>`; el worker recibe la orden de hacer commit ahí. Se fusiona con
+git normal (`git -C <repo> merge mx/<id>`); `list_worktrees` (ops) lista lo que
+hay por fusionar, incluidos los checkouts huérfanos de un servidor anterior
+(`remove_worktree` los quita). Al borrar el terminal, lo que quedara sin
+commit se commitea en la rama, se elimina el checkout, y la rama solo se borra
+si está fusionada. Nunca se pierde trabajo.
+
+**Avisos:** el servidor emite `waiting` (un worker ha hecho una pregunta),
+`stuck` (lleva `MAESTRO_STUCK_AFTER` s, por defecto 600, en `processing` sin
+que la pantalla cambie, descontando el spinner) y `error` (Claude salió). El
+panel los muestra en el ticker y lanza notificaciones del sistema (pide
+permiso al pulsar el logo).
+
 Perfiles (Markdown con front matter YAML, mismo formato que CAO) en
 `src/maestro/profiles/`: `worker`, `code_supervisor`, `reviewer`. Una copia con
 el mismo nombre en `~/.maestro/profiles/` tiene prioridad.
@@ -69,6 +90,7 @@ GET  /sessions/{n}                      DELETE /sessions/{n}
 GET  /sessions/{n}/terminals            POST /sessions/{n}/terminals  {agent_profile, working_directory, model, caller_id, initial_message, wait}
 GET  /terminals/{id}                    DELETE /terminals/{id}
 POST /terminals/{id}/input {message}    POST /terminals/{id}/inbox/messages {message, sender_id}
+POST /terminals/{id}/answer {answer}    POST /terminals/{id}/interrupt        POST /terminals/{id}/restart
 GET  /terminals/{id}/output?mode=full|last
 GET  /events (SSE)                      GET /events/history?limit=
 GET  /agents/profiles                   GET /agents/profiles/{name}
@@ -77,8 +99,8 @@ GET  /agents/profiles                   GET /agents/profiles/{name}
 ## Lo que no tiene (a propósito)
 
 Otros proveedores (Kiro, Codex, Kimi, Copilot…), Kubernetes y nodos remotos,
-workflows, memoria compartida, worktrees automáticos, autenticación, plugins,
-TUI, base de datos. Si algún día hace falta, se añade en el sitio obvio.
+workflows, memoria compartida, autenticación, plugins, TUI, base de datos. Si
+algún día hace falta, se añade en el sitio obvio.
 
 ## Tests
 

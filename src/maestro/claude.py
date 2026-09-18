@@ -23,8 +23,12 @@ from maestro.profiles import Profile
 SPINNER = re.compile(r"^[ \t]*[✶✢✽✻✳·*][ \t]+\w*ing\b.*…")
 # Older footers say this while a turn runs.
 INTERRUPT = "esc to interrupt"
-# The Ink selection footer of AskUserQuestion / permission prompts.
-WAITING = re.compile(r"↑/↓ to navigate|Enter to confirm[ \t]*·")
+# The Ink selection footer of AskUserQuestion / permission prompts, and the
+# "Enter to continue" footer of the Rewind menu and similar overlays.
+WAITING = re.compile(r"↑/↓ to navigate|Enter to (?:confirm|continue)[ \t]*·")
+# The Rewind menu: what a second Escape opens on an idle prompt. Never wanted
+# in an unattended session; the fleet dismisses it on sight.
+REWIND = "Restore the code and/or conversation"
 PLAN_APPROVAL = "Would you like to proceed?"
 OPTION_LINE = re.compile(r"^\s*(?:[❯>]\s*)?\d+\.", re.MULTILINE)
 # Dialogs maestro answers itself, so they must never read as "waiting".
@@ -194,6 +198,28 @@ def ensure_trusted(cwd: str) -> None:
 
     path = _claude_config_file()
     if path.exists():  # never invent the file: onboarding must have run once
+        _rewrite_json(path, mutate)
+
+
+def forget_trusted(cwd: str) -> None:
+    """Drop the trust entries ``ensure_trusted`` made for a one-off directory."""
+    candidates = {cwd, os.path.realpath(cwd)}
+
+    def mutate(cfg: dict) -> bool:
+        projects = cfg.get("projects")
+        if not isinstance(projects, dict):
+            return False
+        removed = False
+        for path in candidates:
+            entry = projects.get(path)
+            # Only entries that hold nothing but what ensure_trusted wrote.
+            if isinstance(entry, dict) and set(entry) <= {"allowedTools", "hasTrustDialogAccepted"}:
+                del projects[path]
+                removed = True
+        return removed
+
+    path = _claude_config_file()
+    if path.exists():
         _rewrite_json(path, mutate)
 
 

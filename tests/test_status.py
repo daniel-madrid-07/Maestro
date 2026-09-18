@@ -49,6 +49,11 @@ class DetectStatus(unittest.TestCase):
         )
         self.assertEqual(claude.detect_status(screen), "waiting_user_answer")
 
+    def test_rewind_menu_reads_as_waiting(self):
+        # Captured after two Escapes on an idle prompt: "Enter to continue · Esc to cancel".
+        self.assertEqual(claude.detect_status(fixture("rewind_dialog")), "waiting_user_answer")
+        self.assertIn(claude.REWIND, fixture("rewind_dialog"))
+
     def test_trust_dialog_is_not_waiting(self):
         screen = (
             "Accessing workspace:\n /mnt/c/x\n Yes, I trust this folder\n ❯ No, exit\n"

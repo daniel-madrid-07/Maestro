@@ -2,8 +2,9 @@
 
 Two workers editing the same repository trample each other; a worktree gives
 each its own directory on branch ``mx/<terminal_id>``. The orchestrator merges
-the branch with plain git; ``remove`` never throws work away, so a branch with
-unmerged commits survives the terminal.
+the branch with plain git; ``remove`` never throws work away: anything left
+uncommitted is committed on the branch first, and a branch with commits the
+repo's HEAD lacks survives the terminal.
 """
 
 import os
@@ -41,14 +42,38 @@ def create(working_directory: str, terminal_id: str) -> Worktree:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     added = _git("-C", repo, "worktree", "add", "-b", branch, path, "HEAD")
     if added.returncode != 0:
+        # -b may have created the branch before the checkout failed; it points
+        # at HEAD, so -d removes it without losing anything.
+        _git("-C", repo, "branch", "-d", branch)
         raise RuntimeError(f"git worktree add failed: {added.stderr.strip() or added.stdout.strip()}")
     return Worktree(repo=repo, path=path, branch=branch)
 
 
+def _commit_leftovers(worktree: Worktree) -> bool:
+    """Commit whatever the worker left uncommitted, so removing the checkout loses nothing."""
+    dirty = _git("-C", worktree.path, "status", "--porcelain")
+    if dirty.returncode != 0 or not dirty.stdout.strip():
+        return False
+    _git("-C", worktree.path, "add", "-A")
+    # An explicit identity: the repo may have none configured, and a failed
+    # commit here would turn into deleted work below.
+    done = _git(
+        "-C", worktree.path, "-c", "user.name=maestro", "-c", "user.email=maestro@localhost",
+        "commit", "-q", "-m", f"maestro: uncommitted work left in {worktree.branch}",
+    )
+    return done.returncode == 0
+
+
 def remove(worktree: Worktree) -> dict:
-    """Drop the checkout; delete the branch only when it is merged into HEAD. Never raises."""
-    result = {"removed": False, "branch_kept": True, "reason": None}
+    """Drop the checkout; delete the branch only when it is merged into HEAD. Never raises.
+
+    A dirty checkout is committed on its branch first (``committed`` says so);
+    the checkout itself is then always removed, ignored files included.
+    """
+    result = {"removed": False, "branch_kept": True, "committed": False, "reason": None}
     try:
+        if os.path.isdir(worktree.path):
+            result["committed"] = _commit_leftovers(worktree)
         gone = _git("-C", worktree.repo, "worktree", "remove", "--force", worktree.path)
         _git("-C", worktree.repo, "worktree", "prune")
         result["removed"] = not os.path.exists(worktree.path)

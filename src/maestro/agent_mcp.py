@@ -51,7 +51,8 @@ def assign(
     result's ``worktree`` gives its path and branch. The worker is told to
     commit there. Merge it yourself with plain git afterwards
     (``git -C <repo> merge mx/<terminal_id>``). Deleting the terminal removes
-    the checkout; the branch is kept when it has unmerged commits.
+    the checkout after committing anything left uncommitted on the branch; the
+    branch is kept when it has commits the repo's HEAD lacks.
     """
     try:
         me = _me()
@@ -102,9 +103,11 @@ def handoff(
     result's ``worktree`` gives its path and branch. The worker is told to
     commit there. Merge it yourself with plain git afterwards
     (``git -C <repo> merge mx/<terminal_id>``). Deleting the terminal removes
-    the checkout; the branch is kept when it has unmerged commits.
+    the checkout after committing anything left uncommitted on the branch; the
+    branch is kept when it has commits the repo's HEAD lacks.
     Here the terminal is closed for you, so the result's ``worktree`` also
-    says whether the branch was kept (``branch_kept``).
+    says whether the branch was kept (``branch_kept``) and whether leftovers
+    had to be committed (``committed``).
     """
     terminal_id = None
     try:
@@ -126,10 +129,16 @@ def handoff(
         terminal_id = term["id"]
         deadline = time.time() + timeout
         status = "processing"
+        idle_polls = 0
         while time.time() < deadline:
             time.sleep(3)
             status = request("GET", f"/terminals/{terminal_id}")["status"]
             if status in ("completed", "error", "waiting_user_answer"):
+                break
+            # A worker that was interrupted (or answered nothing) sits idle
+            # with no result coming; a brief idle can still be a repaint.
+            idle_polls = idle_polls + 1 if status == "idle" else 0
+            if idle_polls >= 3:
                 break
         if status != "completed":
             return {
@@ -212,7 +221,9 @@ def answer_prompt(terminal_id: str, answer: str) -> dict[str, Any]:
 
     ``answer`` is a key (Enter, Escape, Up, Down, Tab, Space), a single digit
     (in an option dialog it selects and submits that option: ``"2"`` = the
-    second one), or text, which is typed and followed by Enter.
+    second one), or one line of text, typed and followed by Enter — only where
+    a text field has focus (an option list treats letters as hotkeys). Escape
+    cancels the question and ends the turn with no answer.
     """
     try:
         return request("POST", f"/terminals/{terminal_id}/answer", body={"answer": answer})
@@ -224,8 +235,10 @@ def answer_prompt(terminal_id: str, answer: str) -> dict[str, Any]:
 def interrupt(terminal_id: str) -> dict[str, Any]:
     """Stop a terminal's current turn (Escape), e.g. when a worker is going in circles.
 
-    Returns the status observed ~2 s later (normally idle or completed); queued
-    messages are then delivered as usual.
+    Only while its status is processing or waiting_user_answer (an idle prompt
+    has nothing to interrupt and is refused). Returns the status observed ~2 s
+    later (normally idle); an interrupted handoff worker returns to its caller
+    as not completed.
     """
     try:
         return request("POST", f"/terminals/{terminal_id}/interrupt")

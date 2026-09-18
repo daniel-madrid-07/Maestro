@@ -62,7 +62,7 @@ class DetectStatus(unittest.TestCase):
         self.assertNotEqual(claude.detect_status(screen), "waiting_user_answer")
 
     def test_shell_prompt_is_unknown(self):
-        self.assertEqual(claude.detect_status("daniel@Zeik:~$ \n"), "unknown")
+        self.assertEqual(claude.detect_status("user@host:~$ \n"), "unknown")
 
     def test_empty_is_unknown(self):
         self.assertEqual(claude.detect_status("\n\n"), "unknown")

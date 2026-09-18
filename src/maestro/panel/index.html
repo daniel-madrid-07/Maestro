@@ -1,0 +1,1407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maestro</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#15171b">
+<meta name="description" content="Live view of the Claude Code sessions Maestro is running.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  @font-face {
+    font-family: 'Anthropic Serif';
+    src: url('fonts/AnthropicSerif-Regular.ttf') format('truetype');
+    font-weight: 400;
+    font-display: swap;
+  }
+
+  @font-face {
+    font-family: 'Anthropic Serif';
+    src: url('fonts/AnthropicSerif-Medium.ttf') format('truetype');
+    font-weight: 500;
+    font-display: swap;
+  }
+
+  /* The agent glyphs (U+2722 U+2733 U+2736 U+273B U+273D) are dingbats no text
+     face carries. Bundled rather than fetched, so the panel works offline. */
+  @font-face {
+    font-family: 'Noto Sans Symbols 2';
+    src: url('fonts/NotoSansSymbols2-Symbols.woff2') format('woff2');
+    font-weight: 400;
+    font-display: block;
+    unicode-range: U+00B7, U+2022, U+2190-21FF, U+2500-27BF, U+2B00-2BFF;
+  }
+
+  :root {
+    --field:       oklch(0.125 0.012 258);
+    --field-deep:  oklch(0.082 0.010 258);
+    /* Same hue at zero alpha. Fading to `transparent` would interpolate through
+       transparent BLACK and cast a grey-green haze across the middle. */
+    --field-0:     oklch(0.125 0.012 258 / 0);
+    --hair:        oklch(0.42  0.020 258);
+    --dim:         oklch(0.55  0.015 258);
+    --read:        oklch(0.80  0.012 258);
+    --signal:      rgb(217 119 87);   /* Anthropic's own orange, #D97757 */
+
+    /* Event hues. Handoff is the brand orange, by request, so orchestrator
+       traffic wears the orchestrator's colour. The set was validated for
+       lightness band, chroma floor, colour-vision separation and contrast;
+       the brand orange sits a hair above the dark-mode lightness band and the
+       worst CVD pair is in the 6-8 band, both acceptable because every
+       message also carries its name in text. Do not re-step one alone. */
+    --ev-handoff:    rgb(217 119 87);
+    --ev-a2a:        oklch(0.60 0.13 250);
+    --ev-completion: oklch(0.66 0.13 172);
+    --ev-error:      oklch(0.52 0.20 27);
+
+    --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;
+    --sp-4: 16px; --sp-6: 24px; --sp-8: 32px;
+
+    --r-chip: 3px;
+
+    --ease-out: cubic-bezier(.25, 1, .5, 1);
+    --dur-fast: 150ms;
+    --dur-base: 200ms;
+    --dur-slow: 300ms;
+    --dur-enter: 280ms;
+    --dur-leave: 380ms;
+    --dur-glide: 340ms;
+
+    /* A serif needs more size than a mono to stay legible at readout scale,
+       and it does not want mono's wide tracking. */
+    --t-note:  10px;      /* the ticker, quieter than the corner read-out */
+    --t-micro: 11.5px;
+    --t-label: 14px;
+    --t-read:  15px;
+
+    --track-wide: 0.04em;
+    --track-tight: 0;
+
+    --font: 'Anthropic Serif', Georgia, 'Times New Roman', serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--field);
+    overflow: hidden;
+  }
+
+  body {
+    font-family: var(--font);
+    color: var(--read);
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #field { position: fixed; inset: 0; display: block; }
+
+  #vignette {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(ellipse 70% 70% at 50% 50%,
+      var(--field-0) 40%, var(--field-deep) 100%);
+  }
+
+  #overlay { position: fixed; inset: 0; pointer-events: none; }
+
+  /* ---- node annotation ------------------------------------------------ */
+
+  .tag {
+    position: absolute;
+    top: 0; left: 0;
+    text-align: center;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .tag__name {
+    display: block;
+    font-size: var(--t-label);
+    font-weight: 500;
+    letter-spacing: var(--track-tight);
+    color: var(--read);
+  }
+
+  /* The task's title (its session name), shown on request under the profile
+     name. Folded away until the node is clicked. */
+  .tag__title {
+    display: block;
+    max-height: 0;
+    font-size: var(--t-micro);
+    letter-spacing: var(--track-wide);
+    color: var(--dim);
+    opacity: 0;
+    overflow: hidden;
+    transition: opacity var(--dur-base) var(--ease-out);
+  }
+
+  .tag[data-titled="1"] .tag__title { max-height: 1.6em; opacity: 1; }
+
+  /* How far along the task is, on hover only: what the agent last reported. */
+  .tag__meter {
+    display: block;
+    max-height: 0;
+    font-size: var(--t-micro);
+    letter-spacing: var(--track-wide);
+    color: var(--dim);
+    opacity: 0;
+    overflow: hidden;
+    transition: opacity var(--dur-fast) var(--ease-out);
+  }
+
+  .tag[data-hover="1"] .tag__meter { max-height: 1.6em; opacity: 1; }
+  .tag__meter b { font-weight: 500; color: var(--read); }
+
+  /* The whole fleet's figure, under the mark, while the cursor rests on it. */
+  #core-meter {
+    position: absolute;
+    top: 0; left: 0;
+    width: 120px;
+    text-align: center;
+    font-size: var(--t-micro);
+    letter-spacing: var(--track-wide);
+    color: var(--dim);
+    opacity: 0;
+    transition: opacity var(--dur-fast) var(--ease-out);
+    pointer-events: none;
+  }
+
+  #core-meter[data-show="1"] { opacity: 1; }
+  #core-meter b { font-weight: 500; color: var(--read); }
+
+
+  /* ---- centre mark ----------------------------------------------------- */
+
+  #core {
+    position: absolute;
+    top: 0; left: 0;
+    width: 112px;
+    height: 112px;
+  }
+
+  #core-mark {
+    width: 100%;
+    height: 100%;
+    transform-origin: 50% 50%;
+  }
+
+  #core-mark svg { display: block; width: 100%; height: 100%; }
+
+  /* Out of touch with the server the mark goes cold; answering, it breathes,
+     so the state of the whole system is legible from across the room. */
+  #core[data-live="0"] #core-mark {
+    filter: saturate(0.12) brightness(0.62);
+    transition: filter var(--dur-slow) var(--ease-out);
+  }
+
+  /* ---- corner readout -------------------------------------------------- */
+
+  #readout {
+    position: fixed;
+    left: var(--sp-6);
+    bottom: var(--sp-6);
+    display: flex;
+    gap: var(--sp-6);
+    font-size: var(--t-micro);
+    letter-spacing: var(--track-wide);
+    color: var(--dim);
+    pointer-events: none;
+  }
+
+  #readout b { font-weight: 500; color: var(--read); }
+  #readout[data-link="down"] { color: var(--ev-error); }
+
+  #fleet, #usage { display: flex; gap: var(--sp-6); }
+  #usage b[data-tight="1"] { color: var(--ev-error); }
+
+  /* ---- live ticker ----------------------------------------------------- */
+
+  #ticker {
+    position: fixed;
+    right: var(--sp-6);
+    bottom: var(--sp-6);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--sp-1);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-width: 44ch;
+    pointer-events: none;
+  }
+
+  #ticker li {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+    font-size: var(--t-note);
+    line-height: 1.5;
+    color: var(--dim);
+    opacity: 0;
+    animation: enter var(--dur-enter) var(--ease-out) forwards;
+  }
+
+  /* Once it has arrived the animation is dropped, because an animation with
+     `forwards` outranks inline styles and would freeze the glide below. */
+  #ticker li[data-settled="1"] { animation: none; opacity: 1; }
+
+  #ticker li[data-leaving="1"] {
+    animation: leave var(--dur-leave) var(--ease-out) forwards;
+  }
+
+  @keyframes enter {
+    from { opacity: 0; transform: translate(10px, 6px); }
+    to   { opacity: 1; transform: translate(0, 0); }
+  }
+
+  @keyframes leave {
+    from { opacity: 1; transform: translate(0, 0); }
+    to   { opacity: 0; transform: translate(14px, -2px); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #ticker li { animation: none; opacity: 1; transform: none; }
+    #ticker li[data-leaving="1"] { opacity: 0.35; }
+  }
+
+  #ticker time {
+    color: color-mix(in oklch, var(--dim) 70%, transparent);
+    font-variant-numeric: tabular-nums;
+  }
+
+  #ticker .dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 999px;
+    background: var(--tint);
+    flex: none;
+    transform: translateY(-1px);
+  }
+
+  #ticker .what { color: var(--read); }
+
+  /* ---- empty state ----------------------------------------------------- */
+
+  #empty {
+    position: fixed;
+    left: 50%;
+    top: calc(50% + 84px);
+    transform: translateX(-50%);
+    text-align: center;
+    font-size: var(--t-read);
+    line-height: 1.6;
+    color: var(--dim);
+    opacity: 0;
+    transition: opacity var(--dur-slow) var(--ease-out);
+    pointer-events: none;
+  }
+
+  #empty[data-show="1"] { opacity: 1; }
+
+  #empty span {
+    display: block;
+    margin-top: var(--sp-2);
+    font-size: var(--t-micro);
+    letter-spacing: var(--track-wide);
+    opacity: 0.68;
+  }
+
+  .sr {
+    position: absolute;
+    width: 1px; height: 1px;
+    margin: -1px; padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+</style>
+</head>
+<body>
+  <canvas id="field"></canvas>
+  <div id="vignette"></div>
+
+  <div id="overlay">
+    <div id="core" data-live="0">
+      <div id="core-mark" aria-hidden="true"></div>
+    </div>
+  </div>
+
+  <p id="empty" data-show="0">
+    No active sessions.
+    <span>Launch them from Claude Code and they will appear here</span>
+  </p>
+
+  <div id="readout">
+    <span id="fleet">connecting…</span>
+    <span id="usage"></span>
+  </div>
+
+  <ul id="ticker" aria-live="polite" aria-label="Live activity"></ul>
+
+<script>
+(() => {
+  'use strict';
+
+  // The server that runs the fleet serves this page, so every call is
+  // same-origin: no host to configure, no CORS, works through a tunnel.
+  const API = '';
+
+  // Canvas cannot read CSS custom properties, so the palette is mirrored here.
+  // These two blocks are one token layer and must change together.
+  const C = {
+    hair:   'oklch(0.42 0.020 258)',
+    dim:    'oklch(0.55 0.015 258)',
+    read:   'oklch(0.80 0.012 258)',
+    signal: 'rgb(217, 119, 87)',
+    field:  'oklch(0.125 0.012 258)'
+  };
+
+  // One row per event kind: the colour its traffic is painted in, and how it
+  // reads in the ticker. `wire` false means it never travels a link.
+  // `lch` mirrors `color` as numbers, because the canvas has to interpolate
+  // between two of these and a CSS string cannot be mixed.
+  const KIND = {
+    handoff:        { color: 'rgb(217, 119, 87)',    lch: [0.672, 0.131, 38.8], verb: 'assigns' },
+    a2a_delegation: { color: 'oklch(0.60 0.13 250)',  lch: [0.60, 0.13, 250],  verb: 'delegates' },
+    completion:     { color: 'oklch(0.66 0.13 172)',  lch: [0.66, 0.13, 172],  verb: 'finishes' },
+    error:          { color: 'oklch(0.52 0.20 27)',   lch: [0.52, 0.20, 27],   verb: 'fails' },
+    waiting:        { color: 'rgb(217, 119, 87)',    lch: [0.672, 0.131, 38.8], verb: 'needs an answer' },
+    stuck:          { color: 'oklch(0.52 0.20 27)',   lch: [0.52, 0.20, 27],   verb: 'looks stuck' },
+    launch:         { color: 'oklch(0.80 0.012 258)', lch: [0.80, 0.012, 258], verb: 'joins' },
+    file_mod:       { color: 'oklch(0.55 0.015 258)', lch: [0.55, 0.015, 258], verb: 'files' },
+    other:          { color: 'oklch(0.55 0.015 258)', lch: [0.55, 0.015, 258], verb: '' }
+  };
+
+  const REST_LCH = {
+    dim:    [0.55, 0.015, 258],
+    signal: [0.672, 0.131, 38.8]
+  };
+
+  // Shortest way round the hue circle, so a blue surge on a warm link does not
+  // sweep through every hue in between on its way back.
+  function mixLch(a, b, t) {
+    const dh = ((b[2] - a[2] + 540) % 360) - 180;
+    return `oklch(${(a[0] + (b[0] - a[0]) * t).toFixed(3)} `
+         + `${(a[1] + (b[1] - a[1]) * t).toFixed(3)} `
+         + `${(a[2] + dh * t).toFixed(1)})`;
+  }
+
+  const STATE = {
+    idle: 'idle',
+    processing: 'working',
+    completed: 'done',
+    waiting_user_answer: 'waiting',
+    error: 'error',
+    unknown: 'no signal'
+  };
+
+  const TAU = Math.PI * 2;
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const canvas = document.getElementById('field');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const core = document.getElementById('core');
+  const coreMark = document.getElementById('core-mark');
+  const readout = document.getElementById('readout');
+  const fleetOut = document.getElementById('fleet');
+  const usageOut = document.getElementById('usage');
+  const emptyMsg = document.getElementById('empty');
+  const ticker = document.getElementById('ticker');
+
+  let W = 0, H = 0, cx = 0, cy = 0, ring = 0;
+
+  const nodes = new Map();
+  let eventCount = 0;
+  let linkUp = false;
+  let corePulse = 0;
+
+  /* ---------- centre mark ------------------------------------------------ */
+
+  // Claude Code's terminal spinner cycles six glyphs -- · ✢ ✳ ✶ ✻ ✽ -- at
+  // 120ms; the worker glyphs use that. The mark animates differently, and these
+  // numbers come from measuring a screen recording of it frame by frame.
+  const FRAME_MS = 120;
+  const FRAMES = [0.14, 0.42, 0.62, 0.78, 0.90, 1.00];
+  const CYCLE = FRAMES.length * 2;
+
+  const MARK_PATH = "m19.6 66.5 19.7-11 .3-1-.3-.5h-1l-3.3-.2-11.2-.3L14 53l-9.5-.5-2.4-.5L0 49l.2-1.5 2-1.3 2.9.2 6.3.5 9.5.6 6.9.4L38 49.1h1.6l.2-.7-.5-.4-.4-.4L29 41l-10.6-7-5.6-4.1-3-2-1.5-2-.6-4.2 2.7-3 3.7.3.9.2 3.7 2.9 8 6.1L37 36l1.5 1.2.6-.4.1-.3-.7-1.1L33 25l-6-10.4-2.7-4.3-.7-2.6c-.3-1-.4-2-.4-3l3-4.2L28 0l4.2.6L33.8 2l2.6 6 4.1 9.3L47 29.9l2 3.8 1 3.4.3 1h.7v-.5l.5-7.2 1-8.7 1-11.2.3-3.2 1.6-3.8 3-2L61 2.6l2 2.9-.3 1.8-1.1 7.7L59 27.1l-1.5 8.2h.9l1-1.1 4.1-5.4 6.9-8.6 3-3.5L77 13l2.3-1.8h4.3l3.1 4.7-1.4 4.9-4.4 5.6-3.7 4.7-5.3 7.1-3.2 5.7.3.4h.7l12-2.6 6.4-1.1 7.6-1.3 3.5 1.6.4 1.6-1.4 3.4-8.2 2-9.6 2-14.3 3.3-.2.1.2.3 6.4.6 2.8.2h6.8l12.6 1 3.3 2 1.9 2.7-.3 2-5.1 2.6-6.8-1.6-16-3.8-5.4-1.3h-.8v.4l4.6 4.5 8.3 7.5L89 80.1l.5 2.4-1.3 2-1.4-.2-9.2-7-3.6-3-8-6.8h-.5v.7l1.8 2.7 9.8 14.7.5 4.5-.7 1.4-2.6 1-2.7-.6-5.8-8-6-9-4.7-8.2-.5.4-2.9 30.2-1.3 1.5-3 1.2-2.5-2-1.4-3 1.4-6.2 1.6-8 1.3-6.4 1.2-7.9.7-2.6v-.2H49L43 72l-9 12.3-7.2 7.6-1.7.7-3-1.5.3-2.8L24 86l10-12.8 6-7.9 4-4.6-.1-.5h-.3L17.2 77.4l-4.7.6-2-2 .2-3 1-1 8-5.5Z";
+
+  // The mark's animation, measured -- not modelled -- from a screen recording
+  // (238 frames, the icon re-centred on its hub in every frame, frame-blended
+  // captures dropped, frames folded onto the fitted 717 ms period by their
+  // timestamps). It is a strict loop of eight held shapes, ~90 ms each; a
+  // recording of this page measured against the original agrees to a mean
+  // reach difference of 0.02. Each row is one shape: the
+  // reach of the twelve arms, by ascending bearing, as a fraction of that
+  // arm's full reach. Three or four neighbouring arms are drawn in at a time
+  // and the others are *nearly* full -- 0.8 to 1.0, unevenly -- which is what
+  // a smooth wave got wrong.
+  const MARK_STEP = 90;
+  const MARK_STEPS = [
+    [0.987, 0.968, 0.974, 0.906, 0.890, 0.858, 0.759, 0.657, 0.641, 0.915, 0.895, 0.977],
+    [0.925, 0.860, 0.906, 0.891, 0.930, 0.923, 0.896, 0.814, 0.732, 0.713, 0.650, 0.917],
+    [0.913, 0.953, 0.976, 0.968, 0.976, 0.977, 0.979, 0.899, 0.803, 0.701, 0.567, 0.585],
+    [0.656, 0.607, 0.957, 0.901, 0.952, 0.927, 0.936, 0.934, 0.917, 0.874, 0.719, 0.657],
+    [0.709, 0.611, 0.656, 0.919, 0.941, 0.934, 0.941, 0.924, 0.965, 0.932, 0.831, 0.768],
+    [0.861, 0.719, 0.695, 0.609, 0.591, 0.920, 0.924, 0.920, 0.983, 0.952, 0.930, 0.941],
+    [0.945, 0.830, 0.825, 0.665, 0.615, 0.643, 0.611, 0.989, 0.991, 0.950, 0.988, 0.965],
+    [0.977, 0.936, 0.904, 0.801, 0.733, 0.703, 0.605, 0.616, 0.959, 0.984, 0.976, 0.990]
+  ];
+  const MARK_CX = 51.71;    // area centroid of the path -- it is not (50, 50)
+  const MARK_CY = 48.41;
+  const MARK_HUB = 10;      // radius below which the outline never moves
+
+  // The outline, parsed once into absolute coordinates. Every frame it is
+  // re-emitted with its vertices pulled toward the hub, arm by arm. Deforming
+  // the one closed polygon is what rules out seams: clipping the logo into
+  // per-arm wedges left hairlines at every boundary and a visible disc where
+  // a fixed core met the shrunken arms.
+  const markCmds = (() => {
+    const tok = MARK_PATH.match(/[MmLlHhVvCcZz]|-?\d*\.?\d+/g);
+    const out = [];
+    let cmd = null, x = 0, y = 0, i = 0;
+    const num = () => parseFloat(tok[i++]);
+    while (i < tok.length) {
+      if (/[A-Za-z]/.test(tok[i])) {
+        cmd = tok[i++];
+        if (cmd === 'Z' || cmd === 'z') { out.push({ c: 'Z', p: [] }); continue; }
+      }
+      switch (cmd) {
+        case 'm': x += num(); y += num(); out.push({ c: 'M', p: [[x, y]] }); cmd = 'l'; break;
+        case 'M': x = num();  y = num();  out.push({ c: 'M', p: [[x, y]] }); cmd = 'L'; break;
+        case 'l': x += num(); y += num(); out.push({ c: 'L', p: [[x, y]] }); break;
+        case 'L': x = num();  y = num();  out.push({ c: 'L', p: [[x, y]] }); break;
+        case 'h': x += num();             out.push({ c: 'L', p: [[x, y]] }); break;
+        case 'H': x = num();              out.push({ c: 'L', p: [[x, y]] }); break;
+        case 'v': y += num();             out.push({ c: 'L', p: [[x, y]] }); break;
+        case 'V': y = num();              out.push({ c: 'L', p: [[x, y]] }); break;
+        case 'c': {
+          const p1 = [x + num(), y + num()], p2 = [x + num(), y + num()];
+          x += num(); y += num();
+          out.push({ c: 'C', p: [p1, p2, [x, y]] }); break;
+        }
+        case 'C': {
+          const p1 = [num(), num()], p2 = [num(), num()];
+          x = num(); y = num();
+          out.push({ c: 'C', p: [p1, p2, [x, y]] }); break;
+        }
+      }
+    }
+    return out;
+  })();
+
+  const bearing = ([x, y]) => (Math.atan2(y - MARK_CY, x - MARK_CX) * 180 / Math.PI + 360) % 360;
+  const reach = ([x, y]) => Math.hypot(x - MARK_CX, y - MARK_CY);
+
+  // Arm tips: the outline's local maxima of reach. The recording and the path
+  // agree on twelve, within a few degrees, so the table's columns map onto
+  // these by bearing order.
+  const ARM_TIPS = (() => {
+    const verts = markCmds.filter(c => c.c !== 'Z').map(c => c.p[c.p.length - 1]);
+    const r = verts.map(reach), n = verts.length, tips = [];
+    for (let k = 0; k < n; k++) {
+      if (r[k] < 25) continue;
+      let top = true;
+      for (let j = -4; j <= 4 && top; j++) if (r[(k + j + n) % n] > r[k]) top = false;
+      if (top) tips.push({ a: bearing(verts[k]), r: r[k] });
+    }
+    return tips.sort((p, q) => p.a - q.a);
+  })();
+  const ARM_ANGLES = ARM_TIPS.map(t => t.a);
+  const ARM_REACH = ARM_TIPS.map(t => t.r);
+
+  coreMark.innerHTML =
+    `<svg viewBox="0 0 100 100" fill="${C.signal}" aria-hidden="true">
+       <path d="${MARK_PATH}"/>
+     </svg>`;
+  const markPath = coreMark.querySelector('path');
+
+  // Scale for a vertex at this bearing. Arms keep a rigid plateau so their
+  // edges retract exactly as much as their tip; only the gap between two arms
+  // blends, which is where the valley vertices sit -- and those barely move
+  // anyway, being close to the hub.
+  function armScaleAt(theta, scales) {
+    const n = ARM_ANGLES.length;
+    let i = n - 1;
+    for (let k = 0; k < n; k++) if (ARM_ANGLES[k] <= theta) i = k;
+    const a0 = ARM_ANGLES[i], a1 = ARM_ANGLES[(i + 1) % n];
+    const gap = ((a1 - a0) % 360 + 360) % 360 || 360;
+    const t = (((theta - a0) % 360) + 360) % 360 / gap;
+    const u = Math.min(1, Math.max(0, (t - 0.35) / 0.3));
+    const w = u * u * (3 - 2 * u);
+    return scales[i] * (1 - w) + scales[(i + 1) % n] * w;
+  }
+
+  function deformedPath(scales) {
+    let d = '';
+    for (const cmd of markCmds) {
+      if (cmd.c === 'Z') { d += 'Z'; continue; }
+      d += cmd.c + cmd.p.map(pt => {
+        const r = reach(pt);
+        if (r <= MARK_HUB) return `${pt[0].toFixed(2)} ${pt[1].toFixed(2)}`;
+        const k = (MARK_HUB + (r - MARK_HUB) * armScaleAt(bearing(pt), scales)) / r;
+        return `${(MARK_CX + (pt[0] - MARK_CX) * k).toFixed(2)} `
+             + `${(MARK_CY + (pt[1] - MARK_CY) * k).toFixed(2)}`;
+      }).join(' ');
+    }
+    return d;
+  }
+
+  const busyFleet = () => {
+    for (const n of nodes.values()) if (n.status === 'processing') return true;
+    return false;
+  };
+
+  let armsMoving = false;
+  let lastStep = -1;
+
+  function paintMark(now) {
+    // This is a *thinking* animation: in the product it runs while an answer is
+    // being produced and is absent otherwise, so the mark only stirs while the
+    // fleet has work in flight.
+    const thinking = linkUp && !reduceMotion && (busyFleet() || corePulse > 0.02);
+
+    if (!thinking) {
+      // Settle back to the untouched logo, once, rather than every frame.
+      if (armsMoving) { markPath.setAttribute('d', MARK_PATH); armsMoving = false; lastStep = -1; }
+      return;
+    }
+    armsMoving = true;
+
+    // Quantised: the recording never showed a length between two held values,
+    // so the path is only rebuilt when the step changes.
+    const step = Math.floor(now / MARK_STEP);
+    if (step === lastStep) return;
+    lastStep = step;
+
+    const row = MARK_STEPS[step % MARK_STEPS.length];
+    // The table holds tip radius over full radius. The deformation pins each
+    // arm's base at the hub, so convert to the scale of the part that moves,
+    // using the path's own tip radius for that arm.
+    const scales = row.map((s, i) =>
+      Math.max(0.05, (ARM_REACH[i] * s - MARK_HUB) / (ARM_REACH[i] - MARK_HUB)));
+    markPath.setAttribute('d', deformedPath(scales));
+  }
+
+  /* ---------- geometry --------------------------------------------------- */
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = W / 2; cy = H / 2;
+    const half = core.offsetWidth / 2 || 56;
+    core.style.transform = `translate(${cx - half}px, ${cy - half}px)`;
+    layout();
+  }
+  addEventListener('resize', resize);
+
+  // Nodes sit on one ring. Links, not position, carry the parent/child
+  // topology -- a worker spawned by another worker still sits on the ring, and
+  // the chord between them shows who called whom.
+  function layout() {
+    const list = [...nodes.values()];
+    // The ring widens with the crowd, so neighbouring labels keep their
+    // distance instead of colliding as the fleet grows.
+    ring = Math.min(W, H) * Math.min(0.29 + list.length * 0.012, 0.40);
+    list.forEach((n, i) => {
+      n.angle = (i / Math.max(list.length, 1)) * TAU - Math.PI / 2;
+      n.tx = cx + Math.cos(n.angle) * ring;
+      n.ty = cy + Math.sin(n.angle) * ring;
+    });
+  }
+
+  // The mark's arms reach almost the full width of its 112px box, so links are
+  // trimmed just outside that.
+  const CORE_R = 60;
+  const NODE_R = 15;
+  const TAG_CLEAR = 24;    // gap between a glyph and its own label
+  const SURGE_HOLD = 500;  // ms a wire stays lit after traffic, however brief
+  const NOTE_TTL = 11000;  // ms a ticker line stays before it fades
+  const HOP_EVERY = 1000;  // ms between one hop of a working glyph and the next
+  const HOP_RISE = 200;    // ms the hop itself takes, leaving 800ms at rest
+  const HOP_HEIGHT = 2;    // px
+
+  function anchorOf(id) {
+    const n = id && nodes.get(id);
+    return n ? { x: n.x, y: n.y, r: NODE_R } : { x: cx, y: cy, r: CORE_R };
+  }
+
+  // Trim both ends of a segment so traffic emerges from the edge of a body
+  // rather than from inside it.
+  function span(a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    const start = Math.min(a.r, len * 0.4);
+    const end = Math.min(b.r, len * 0.4);
+    return {
+      ax: a.x + ux * start, ay: a.y + uy * start,
+      bx: b.x - ux * end,   by: b.y - uy * end
+    };
+  }
+
+  /* ---------- data ------------------------------------------------------- */
+
+  async function api(path, init) {
+    const r = await fetch(API + path, { cache: 'no-store', ...init });
+    if (!r.ok) throw new Error(`${path} -> ${r.status}`);
+    return r.status === 204 ? null : r.json();
+  }
+
+  function makeNode(t, sessionName) {
+    return {
+      id: t.id,
+      label: t.agent_profile || t.name || t.id,
+      session: sessionName,
+      parent: t.caller_id || null,
+      status: t.status || 'unknown',
+      titled: false,      // its task title is shown only when asked for
+      progress: progressOf(t),
+      stuck: !!t.stuck,   // processing, but the screen has not moved for minutes
+      born: performance.now(),
+      activity: 0,
+      surge: 0,           // 1 right after traffic crossed, decaying to rest
+      surgeKind: null,    // what crossed, which is what colours the dust
+      surgeUntil: 0,      // held at full until this timestamp
+      hopPhase: Math.random() * HOP_EVERY,
+      // Born at the centre, with real coordinates from the start. Leaving these
+      // undefined until layout() runs loses the race against the render loop:
+      // one frame of `undefined + n` poisons x/y to NaN permanently, and the
+      // browser then silently drops the tag's transform.
+      x: cx, y: cy, tx: cx, ty: cy,
+      angle: 0,
+      el: null,
+      dust: Array.from({ length: 17 }, () => ({
+        t: Math.random(),
+        phase: Math.random() * TAU,
+        amp: 1.5 + Math.random() * 3.5
+      }))
+    };
+  }
+
+  let firstPoll = true;
+
+  // CAO's status field drifts on long sessions: it is inferred from a raw
+  // redraw stream and ends up calling a terminal with a live spinner "idle".
+  // The rendered tail of the terminal is the honest witness, so with CAO
+  // behind the panel each node's status is re-read from it: a spinner or a
+  // running tool means work, an option footer means a question. Maestro reads
+  // the rendered screen itself, so its status is taken as is.
+  let secondOpinion = true;
+  const SPINNER_RE = /(?:^|\n)\s*[✶✢✽✻✳·*]\s+\S*ing…|⎿\s+Running…|esc to interrupt/;
+  const WAITING_RE = /↑\/↓ to navigate|Enter to (?:confirm|continue)\s*·/;
+
+  async function whichBackend() {
+    try {
+      const h = await api('/health');
+      secondOpinion = !(h && h.maestro);
+    } catch { secondOpinion = true; }
+  }
+
+  async function refineStatus(n) {
+    const id = encodeURIComponent(n.id);
+    try {
+      const { output = '' } = await api(`/terminals/${id}/output?mode=last`);
+      const tail = String(output).slice(-1500);
+      if (WAITING_RE.test(tail)) n.status = 'waiting_user_answer';
+      else if (SPINNER_RE.test(tail)) n.status = 'processing';
+    } catch { /* keep what the server said */ }
+    // CAO's session listing omits metadata and caller_id; the terminal
+    // record has both, and metadata.progress is where its workers report.
+    try {
+      const t = await api(`/terminals/${id}`);
+      n.progress = progressOf(t);
+      n.parent = t.caller_id || n.parent;
+    } catch { /* keep the last reading */ }
+  }
+
+  async function pollFleet() {
+    try {
+      const sessions = await api('/sessions');
+      if (!linkUp || firstPoll) await whichBackend();
+      linkUp = true;
+
+      const seen = new Set();
+      for (const s of sessions) {
+        const name = s.id || s.name || s.session_name;
+        if (!name) continue;
+        let detail;
+        try { detail = await api('/sessions/' + encodeURIComponent(name)); }
+        catch { continue; }
+        for (const t of (detail.terminals || [])) {
+          if (!t || !t.id) continue;
+          seen.add(t.id);
+          const existing = nodes.get(t.id);
+          if (existing) {
+            existing.status = t.status || existing.status;
+            existing.stuck = !!t.stuck;
+            existing.progress = progressOf(t);
+            existing.parent = t.caller_id || existing.parent;
+            existing.label = t.agent_profile || existing.label;
+          } else {
+            nodes.set(t.id, makeNode(t, name));
+            // Sessions already running when the panel opens did not just join;
+            // announcing them would date every reload as a fresh launch.
+            if (!firstPoll) note('launch', `${t.agent_profile || t.id} joined`);
+          }
+        }
+      }
+
+      for (const id of [...nodes.keys()]) {
+        if (!seen.has(id)) removeNode(id);
+      }
+      if (secondOpinion) {
+        await Promise.all([...nodes.values()].filter(n => seen.has(n.id)).map(refineStatus));
+      }
+      paintCoreMeter();
+      layout();
+    } catch {
+      linkUp = false;
+    }
+    firstPoll = false;
+    paintState();
+  }
+
+  // A per-agent "what is it saying" line used to live here. CAO returns only
+  // the visible tmux pane -- 2KB, no scrollback -- so once an answer scrolls
+  // past, what is left is the TUI's own footer and promos. Every attempt to
+  // filter that produced lines like "Fable 5.1 writes better code" attributed
+  // to an agent. Showing nothing beats putting words in their mouths; the
+  // ticker carries what is actually happening.
+
+  function removeNode(id) {
+    const n = nodes.get(id);
+    if (n) {
+      if (n.el) n.el.remove();
+      note('completion', `${n.label} left`);
+    }
+    nodes.delete(id);
+  }
+
+  /* ---------- live events ------------------------------------------------ */
+
+  // The SSE stream only carries what happens from now on, so opening the panel
+  // mid-run would show an empty ticker until the next event. Replay the tail of
+  // the ring buffer once -- as ticker lines only, never as particles, because
+  // animating traffic that already landed would be a lie.
+  let backfilled = false;
+
+  async function backfill() {
+    if (backfilled) return;
+    backfilled = true;
+    try {
+      const { events = [] } = await api('/events/history?limit=40');
+      eventCount = events.length;
+      // Topology from history too: a worker's first dispatch names its parent.
+      for (const ev of events) {
+        const d = ev.detail || {};
+        const target = nodes.get(d.receiver);
+        if (target && !target.parent && d.sender && nodes.has(d.sender) && d.sender !== d.receiver
+            && /assign|handoff/.test(d.orchestration_type || '')) {
+          target.parent = d.sender;
+        }
+      }
+      for (const ev of events.slice(-5)) {
+        const kind = ev.kind in KIND ? ev.kind : 'other';
+        const d = ev.detail || {};
+        note(kind,
+          kind === 'launch' ? `${d.agent_name || nameOf(ev.terminal_id)} joined`
+          : kind === 'completion' ? `${nameOf(ev.terminal_id)} finished`
+          : kind === 'error' ? `${nameOf(ev.terminal_id)} failed`
+          : kind === 'waiting' || kind === 'stuck' ? `${labelOf(ev)} ${KIND[kind].verb}`
+          : kind === 'other' ? `${labelOf(ev)} ${String(d.event_type || 'event').replace(/^terminal_/, '')}`
+          : `${senderName(d.sender)} → ${nameOf(d.receiver || ev.terminal_id)}`,
+          ev.timestamp);
+      }
+      paintState();
+    } catch { /* stream disabled server-side; live events still work */ }
+  }
+
+  function connectEvents() {
+    backfill();
+    let es;
+    try { es = new EventSource(API + '/events'); }
+    catch { return; }
+
+    es.onmessage = (e) => {
+      let ev; try { ev = JSON.parse(e.data); } catch { return; }
+      eventCount++;
+      handleEvent(ev);
+      paintState();
+    };
+
+    // The stream is default-off server-side; a failure here is not fatal --
+    // polling still drives the topology, only the traffic goes unseen.
+    es.onerror = () => { es.close(); setTimeout(connectEvents, 4000); };
+  }
+
+  const nameOf = (id) => (id && nodes.get(id)?.label) || (id ? 'agent' : 'Claude');
+
+  // Traffic whose sender is not a terminal in the fleet came from outside it --
+  // the orchestrator driving the run. That is Claude, not an anonymous agent.
+  const senderName = (id) => (id && nodes.get(id)?.label) || 'Claude';
+
+  // A terminal that failed to start is gone from the fleet before its event
+  // lands, so fall back to the profile name the server put in the event.
+  const labelOf = (ev) => nodes.get(ev.terminal_id)?.label || ev.detail?.agent_name || 'agent';
+
+  /* ---------- system notifications ---------------------------------------
+     Only for what needs the owner: a question, a stall, a failure. Only for
+     live events -- backfill() replays history and must stay silent. Every
+     call is guarded; with notifications blocked or absent the page carries on. */
+
+  const canNotify = () => typeof Notification !== 'undefined';
+
+  function askToNotify() {
+    if (!canNotify() || Notification.permission !== 'default') return;
+    try {
+      const p = Notification.requestPermission();
+      if (p && p.catch) p.catch(() => {});
+    } catch { /* older engines want a callback; ignoring is harmless */ }
+  }
+
+  function notify(kind, ev) {
+    if (!canNotify() || Notification.permission !== 'granted') return;
+    // One live notification per terminal and kind: a repeat replaces it.
+    // renotify: a second question from the same worker must ring again, not
+    // silently replace the first (Chrome and Edge drop it otherwise).
+    try { new Notification(labelOf(ev), { body: KIND[kind].verb, tag: `${kind}:${ev.terminal_id}`, renotify: true }); }
+    catch { /* e.g. a platform that only notifies from a service worker */ }
+  }
+
+  function handleEvent(ev) {
+    const d = ev.detail || {};
+    const kind = ev.kind in KIND ? ev.kind : 'other';
+
+    if (kind === 'handoff' || kind === 'a2a_delegation') {
+      const from = d.sender && nodes.has(d.sender) ? d.sender : null;
+      const to = d.receiver && nodes.has(d.receiver) ? d.receiver : ev.terminal_id;
+      // CAO does not record who spawned an assigned worker, but the first
+      // dispatch it receives says so. Hang the worker off that sender, so a
+      // supervisor's fleet reads as its own tree instead of everything
+      // radiating from the centre.
+      const target = nodes.get(to);
+      if (from && target && !target.parent && from !== to
+          && /assign|handoff/.test(d.orchestration_type || '')) {
+        target.parent = from;
+      }
+      send(from, to, kind);
+      if (!from) corePulse = 1;
+      // The wire shows that something crossed; the ticker is where it says
+      // what. CAO strips message bodies from its events, so the kind of
+      // dispatch is the most that can honestly be named here.
+      note(kind, `${senderName(d.sender)} → ${nameOf(to)}  ${KIND[kind].verb}`);
+    } else if (kind === 'launch') {
+      corePulse = 1;
+      pollFleet();
+    } else if (kind === 'completion') {
+      const n = nodes.get(ev.terminal_id);
+      if (n) n.status = 'completed';
+      send(ev.terminal_id, null, kind);
+      note(kind, `${nameOf(ev.terminal_id)} finished`);
+    } else if (kind === 'error') {
+      const n = nodes.get(ev.terminal_id);
+      if (n) n.status = 'error';
+      send(ev.terminal_id, null, kind);
+      note(kind, `${nameOf(ev.terminal_id)} failed`);
+      notify(kind, ev);
+    } else if (kind === 'waiting' || kind === 'stuck') {
+      const n = nodes.get(ev.terminal_id);
+      if (n && kind === 'waiting') n.status = 'waiting_user_answer';
+      if (n && kind === 'stuck') n.stuck = true;
+      note(kind, `${labelOf(ev)} ${KIND[kind].verb}`);
+      notify(kind, ev);
+    } else if (kind === 'file_mod') {
+      note(kind, `${nameOf(ev.terminal_id)} touched files`);
+    }
+
+    const n = nodes.get(ev.terminal_id);
+    if (n) n.activity = 1;
+  }
+
+  // A message is not drawn as an object travelling the wire. The wire itself
+  // reacts: its dust takes the colour of what crossed it and is flung along at
+  // several times its resting speed, then coasts back down. from/to === null
+  // means the orchestrator at the centre.
+  function send(from, to, kind) {
+    const n = nodes.get(to) || nodes.get(from);
+    if (!n) return;
+    n.surge = 1;
+    n.surgeKind = kind;
+    // A dispatch can be over in a fraction of a frame. Pinning the surge for
+    // half a second means the wire always reads as having carried something,
+    // instead of flickering once and looking like a glitch.
+    n.surgeUntil = performance.now() + SURGE_HOLD;
+  }
+
+  /* ---------- ticker ------------------------------------------------------ */
+
+  const clock = (iso) => (iso ? new Date(iso) : new Date())
+    .toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  function note(kind, text, at) {
+    // The stack is anchored to the bottom corner, so a new row shoves every
+    // older one up by its own height. Measure first, then put them back and let
+    // them glide -- otherwise the whole column jumps on every event.
+    const older = [...ticker.children];
+    const wasAt = older.map(row => row.getBoundingClientRect().top);
+
+    const li = document.createElement('li');
+    li.style.setProperty('--tint', (KIND[kind] || KIND.other).color);
+    li.innerHTML = `<time>${clock(at)}</time><span class="dot"></span><span class="what"></span>`;
+    li.querySelector('.what').textContent = text;
+    li.addEventListener('animationend', function settle(e) {
+      if (e.animationName === 'enter') li.dataset.settled = '1';
+    });
+    ticker.appendChild(li);
+
+    while (ticker.children.length > 6) ticker.firstElementChild.remove();
+
+    if (!reduceMotion) {
+      older.forEach((row, i) => {
+        if (!row.isConnected) return;
+        const shift = wasAt[i] - row.getBoundingClientRect().top;
+        if (!shift) return;
+        row.style.transition = 'none';
+        row.style.transform = `translateY(${shift}px)`;
+        requestAnimationFrame(() => {
+          row.style.transition = `transform var(--dur-glide) var(--ease-out)`;
+          row.style.transform = '';
+        });
+      });
+    }
+
+    setTimeout(() => {
+      li.dataset.leaving = '1';
+      // Under reduced motion there is no leave animation to end, so the row
+      // would otherwise linger for ever.
+      if (reduceMotion) setTimeout(() => li.remove(), 600);
+      else li.addEventListener('animationend', () => li.remove(), { once: true });
+    }, NOTE_TTL);
+  }
+
+  /* ---------- render ----------------------------------------------------- */
+
+  function linkColor(n) {
+    const rest = n.status === 'error' || n.stuck ? KIND.error.lch
+               : n.status === 'processing' ? REST_LCH.signal
+               : REST_LCH.dim;
+    if (!n.surgeKind || n.surge < 0.004) return mixLch(rest, rest, 0);
+    // The surge decays exponentially, so driving the mix with it makes the
+    // colour bloom and drain on the same curve as the speed.
+    return mixLch(rest, KIND[n.surgeKind].lch, Math.min(1, n.surge * 1.5));
+  }
+
+  function drawLink(ax, ay, bx, by, n, now) {
+    ctx.globalAlpha = 0.07;
+    ctx.strokeStyle = C.hair;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+
+    const dx = bx - ax, dy = by - ay;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len, ny = dx / len;
+
+    const busy = n.status === 'processing';
+    // The surge is the whole message animation: forty times the resting speed
+    // at the instant something crosses, coasting back down over a second or so.
+    // Squaring it keeps the burst brief and the settle gentle.
+    const rush = 1 + n.surge * n.surge * 40;
+    const drift = reduceMotion ? 0 : (busy ? 0.0003 : 0.00008) * rush;
+    const base = (busy ? 0.58 : 0.34) + n.surge * 0.4;
+
+    // Motion blur the way a camera makes it: the smear is exactly how far the
+    // particle travels in one frame, capped so it never becomes a tube. It is
+    // drawn faint and thin behind a crisp head, so these stay visibly separate
+    // particles rather than one continuous stroke.
+    const step = drift * 16.7 * len;
+    const smear = Math.min(step, 13);
+    const size = busy || n.surge > 0.25 ? 1.7 : 1.25;
+
+    const paint = linkColor(n);
+    ctx.fillStyle = paint;
+    ctx.strokeStyle = paint;
+    ctx.lineCap = 'round';
+    ctx.lineWidth = size * 0.8;
+
+    for (const p of n.dust) {
+      p.t = (p.t + drift * 16.7) % 1;
+      const wob = Math.sin(now * 0.0006 + p.phase) * p.amp;
+      const x = ax + dx * p.t + nx * wob;
+      const y = ay + dy * p.t + ny * wob;
+      // Fade at both ends so particles emerge and dissolve instead of
+      // popping at the node edges.
+      const edge = Math.sin(p.t * Math.PI);
+      const alpha = Math.min(1, base * edge * (0.62 + Math.max(n.activity, n.surge) * 0.38));
+
+      if (smear > 2) {
+        // dx/dy span the whole link, so the tail must ride the unit vector --
+        // scaling by the raw span threw the streak hundreds of pixels off screen.
+        const tail = Math.min(smear, p.t * len);   // never reaches past the source
+        ctx.globalAlpha = alpha * 0.32;
+        ctx.beginPath();
+        ctx.moveTo(x - (dx / len) * tail, y - (dy / len) * tail);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+      }
+
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // The same six glyphs the CLI spinner uses. A worker wears one, so its size
+  // reads as how alive it is: a spent agent is a dot, a working one runs the
+  // whole cycle.
+  const GLYPHS = ['·', '✢', '✳', '✶', '✻', '✽'];
+  // Canvas resolves no CSS variables, so this stack is spelled out.
+  // Anthropic Mono is a text face and carries none of these dingbats, so the
+  // symbol font leads here even though it does not elsewhere.
+  const GLYPH_FONT = '"Noto Sans Symbols 2", "Segoe UI Symbol", "Apple Symbols", monospace';
+
+  // A webfont used only on a canvas is never fetched -- nothing in the DOM
+  // references it -- so the first paint would silently fall back. Ask for it.
+  if (document.fonts?.load) document.fonts.load('26px "Noto Sans Symbols 2"');
+
+  // ✳ is the resting face of a node. Only the two states that need to pull the
+  // eye differ: waiting on a human, and failed.
+  const REST_DEFAULT = 2;
+  const REST_GLYPH = {
+    waiting_user_answer: 5,
+    error: 3
+  };
+
+  function drawNode(n, now) {
+    const appear = Math.min(1, (now - n.born) / 600);
+    const ease = 1 - Math.pow(1 - appear, 3);
+
+    // A stuck worker is still "processing" to the server; it stops cycling and
+    // hopping so it reads as frozen, and breathes slowly in the failure red.
+    const stuck = n.stuck && n.status === 'processing';
+    const cycling = n.status === 'processing' && !stuck && !reduceMotion;
+
+    let idx;
+    if (cycling) {
+      const step = Math.floor(now / FRAME_MS) % CYCLE;
+      idx = step < FRAMES.length ? step : CYCLE - 1 - step;
+    } else {
+      idx = stuck ? REST_GLYPH.error : REST_GLYPH[n.status] ?? REST_DEFAULT;
+    }
+
+    // With the state word gone, colour and pulse are what say it: warm and
+    // cycling is working, warm and breathing is waiting on you, dim is at rest,
+    // and red that will not hold still has failed.
+    const beat = stuck ? (reduceMotion ? 0.8 : 0.7 + 0.3 * Math.sin(now * 0.0015))
+               : n.status === 'error' ? 0.6 + 0.4 * Math.sin(now * 0.006)
+               : n.status === 'waiting_user_answer' ? 0.62 + 0.38 * Math.sin(now * 0.0035)
+               : 1;
+    ctx.globalAlpha = 0.95 * ease * beat;
+    ctx.fillStyle = n.status === 'error' || stuck ? KIND.error.color
+                  : (n.status === 'processing' || n.status === 'waiting_user_answer') ? C.signal
+                  : C.dim;
+    ctx.font = `26px ${GLYPH_FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // A hop, not a wobble: the glyph springs up and lands inside HOP_RISE, then
+    // sits still until the next one. A continuous sine just slides it up and
+    // down, which reads as drifting rather than bouncing. Each node keeps its
+    // own offset so a busy fleet does not jump in lockstep.
+    let bob = 0;
+    if (cycling) {
+      const phase = (now + n.hopPhase) % HOP_EVERY;
+      if (phase < HOP_RISE) bob = -Math.sin((phase / HOP_RISE) * Math.PI) * HOP_HEIGHT;
+    }
+
+    ctx.fillText(GLYPHS[idx], n.x, n.y + bob);
+    ctx.globalAlpha = 1;
+  }
+
+  function drawCorePulse() {
+    if (corePulse <= 0.01) return;
+    corePulse *= 0.955;
+    const r = CORE_R + (1 - corePulse) * 70;
+    ctx.globalAlpha = corePulse * 0.35;
+    ctx.strokeStyle = C.signal;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, TAU);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function syncTag(n) {
+    if (!n.el) {
+      const el = document.createElement('div');
+      el.className = 'tag';
+      // The state has no visible word: the glyph, its colour and its motion
+      // carry it. The hidden span keeps that meaning available to a screen
+      // reader, which cannot see any of those three.
+      el.innerHTML = `<b class="tag__name"></b><span class="tag__title"></span><span class="tag__meter"></span><i class="sr tag__state"></i>`;
+      overlay.appendChild(el);
+      n.el = el;
+      n._name = el.querySelector('.tag__name');
+      n._title = el.querySelector('.tag__title');
+      n._meter = el.querySelector('.tag__meter');
+      n._state = el.querySelector('.tag__state');
+    }
+    if (n._name.textContent !== n.label) n._name.textContent = n.label;
+    const title = bareName(n.session);
+    if (n._title.textContent !== title) n._title.textContent = title;
+    const titled = n.titled ? '1' : '0';
+    if (n.el.dataset.titled !== titled) n.el.dataset.titled = titled;
+    const hover = n === hovered ? '1' : '0';
+    if (n.el.dataset.hover !== hover) n.el.dataset.hover = hover;
+    if (hover === '1') {
+      const html = meterHtml(percentOf(n));
+      if (n._meter.innerHTML !== html) n._meter.innerHTML = html;
+    }
+    const st = n.stuck && n.status === 'processing' ? 'stuck' : STATE[n.status] || n.status;
+    if (n._state.textContent !== st) n._state.textContent = st;
+
+    // Tags sit radially outward from the centre. The push has to clear the
+    // glyph in whichever direction it leaves: sideways that means half the tag's
+    // width, vertically half its height. A fixed distance clears the vertical
+    // cases and lets the horizontal ones land on top of the glyph, which is why
+    // this is projected onto the direction rather than constant.
+    const ux = n.x - cx, uy = n.y - cy;
+    const ul = Math.hypot(ux, uy) || 1;
+    const dx = ux / ul, dy = uy / ul;
+    const w = n.el.offsetWidth, h = n.el.offsetHeight;
+    const push = TAG_CLEAR + Math.abs(dx) * (w / 2) + Math.abs(dy) * (h / 2);
+    const x = Math.max(8, Math.min(W - w - 8, n.x + dx * push - w / 2));
+    const y = Math.max(8, Math.min(H - h - 8, n.y + dy * push - h / 2));
+    n.el.style.transform = `translate(${x}px, ${y}px)`;
+  }
+
+  function frame(now) {
+    ctx.fillStyle = C.field;
+    ctx.fillRect(0, 0, W, H);
+
+    for (const n of nodes.values()) {
+      // Ease into position so a re-layout after a launch glides instead of
+      // teleporting.
+      n.x += (n.tx - n.x) * 0.06;
+      n.y += (n.ty - n.y) * 0.06;
+      n.activity *= 0.975;
+      // Held at full through SURGE_HOLD, then ~1.2s coasting back to rest.
+      if (now < n.surgeUntil) n.surge = 1;
+      else n.surge *= 0.955;
+
+      const s = span(anchorOf(n.parent), { x: n.x, y: n.y, r: NODE_R });
+      drawLink(s.ax, s.ay, s.bx, s.by, n, now);
+    }
+
+    drawCorePulse();
+    paintMark(now);
+    for (const n of nodes.values()) { drawNode(n, now); syncTag(n); }
+
+    requestAnimationFrame(frame);
+  }
+
+  function paintState() {
+    const n = nodes.size;
+    core.dataset.live = linkUp ? '1' : '0';
+    emptyMsg.dataset.show = (n === 0 && linkUp) ? '1' : '0';
+    readout.dataset.link = linkUp ? 'up' : 'down';
+    fleetOut.innerHTML = linkUp
+      ? `<span><b>${n}</b> ${n === 1 ? 'session' : 'sessions'}</span>
+         <span><b>${eventCount}</b> ${eventCount === 1 ? 'event' : 'events'}</span>`
+      : '<span>off</span>';
+  }
+
+  /* ---------- subscription usage ------------------------------------------
+     Served by the local panel, which holds the OAuth token: the browser only
+     ever receives percentages. Unavailable is left blank rather than shown as
+     a zero, because a wrong number here is worse than no number. */
+
+  const resetAt = (iso) => {
+    if (!iso) return '';
+    const t = new Date(iso);
+    return Number.isNaN(+t) ? ''
+      : `, resets at ${t.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  };
+
+  // A single failed poll (a 429 from the usage endpoint, a token refresh, a
+  // hiccup on the way there) used to blank the figures for the next minute.
+  // Keep the last good reading on screen and only give up after ten misses.
+  let usageMisses = 0;
+
+  async function pollUsage() {
+    let u;
+    try {
+      u = await (await fetch('/usage', { cache: 'no-store' })).json();
+    } catch { u = null; }
+
+    if (!u || !u.ok) {
+      if (++usageMisses >= 10) usageOut.innerHTML = '';
+      return;
+    }
+    usageMisses = 0;
+
+    const cell = (label, w) =>
+      `<span title="${label} ${w.percent}%${resetAt(w.resets_at)}">` +
+      `<b data-tight="${w.percent >= 80 ? 1 : 0}">${w.percent}%</b> ${label}</span>`;
+
+    usageOut.innerHTML = cell('5 h', u.session) + cell('week', u.week);
+  }
+
+  /* ---------- a worker's title -------------------------------------------
+     Click a worker to read what it is on: the session name the orchestrator
+     gave the task (japan-regions, upscalers …). Click it again, or the empty
+     field, to fold it away. Nodes are painted on the canvas, so the hit test
+     is by distance to the glyph, or by the label's box. */
+
+  const bareName = (session) => String(session || '').replace(/^(?:cao|mx)-/, '');
+
+  function nodeAt(x, y) {
+    for (const n of nodes.values()) {
+      if (Math.hypot(x - n.x, y - n.y) <= NODE_R + 10) return n;
+      const r = n.el && n.el.getBoundingClientRect();
+      if (r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return n;
+    }
+    return null;
+  }
+
+  addEventListener('click', (e) => {
+    askToNotify();   // browsers only grant the prompt inside a user gesture
+    const hit = nodeAt(e.clientX, e.clientY);
+    for (const n of nodes.values()) n.titled = n === hit ? !n.titled : false;
+  });
+
+  /* ---------- progress ------------------------------------------------------
+     A percentage is only honest when the agent itself reports it: Maestro
+     workers through report_progress (``progress.percent``), CAO workers through
+     update_metadata (``metadata.progress``). Without a report, a finished
+     worker counts as done and a running one shows a dash. The mark shows the
+     fleet's mean over what is known. Both appear on hover only. */
+
+  function progressOf(t) {
+    const m = t.metadata && t.metadata.progress;
+    const raw = t.progress && t.progress.percent != null ? t.progress.percent
+              : (m && typeof m === 'object') ? m.percent : m;
+    const p = Number(raw);
+    return Number.isFinite(p) ? Math.max(0, Math.min(100, Math.round(p))) : null;
+  }
+
+  const percentOf = (n) => n.progress != null ? n.progress
+                         : n.status === 'completed' ? 100 : null;
+
+  const meterHtml = (p) => p == null ? '—' : `<b>${p}%</b>`;
+
+  let hovered = null;
+  let coreHover = false;
+  let coreMeter = null;
+
+  function paintCoreMeter() {
+    if (!coreMeter) {
+      coreMeter = document.createElement('div');
+      coreMeter.id = 'core-meter';
+      overlay.appendChild(coreMeter);
+    }
+    const known = [...nodes.values()].map(percentOf).filter(p => p != null);
+    const mean = known.length ? Math.round(known.reduce((a, b) => a + b, 0) / known.length) : null;
+    const html = meterHtml(mean) + (known.length ? ` <span>of ${known.length}</span>` : '');
+    if (coreMeter.innerHTML !== html) coreMeter.innerHTML = html;
+    coreMeter.style.transform = `translate(${cx - 60}px, ${cy + 64}px)`;
+    const show = coreHover && nodes.size ? '1' : '0';
+    if (coreMeter.dataset.show !== show) coreMeter.dataset.show = show;
+  }
+
+  if (matchMedia('(hover: hover)').matches) {
+    addEventListener('mousemove', (e) => {
+      hovered = nodeAt(e.clientX, e.clientY);
+      coreHover = Math.hypot(e.clientX - cx, e.clientY - cy) <= CORE_R;
+      canvas.style.cursor = hovered ? 'pointer' : '';
+      paintCoreMeter();
+    });
+  }
+
+  /* ---------- preview ----------------------------------------------------
+     ?demo drives the same render path from synthetic data, so the field can be
+     checked without a live fleet. It never touches the API. */
+
+  function runDemo() {
+    linkUp = true;
+    const cast = [
+      { id: 'a1', label: 'developer', status: 'processing' },
+      { id: 'b2', label: 'reviewer', status: 'idle' },
+      { id: 'c3', label: 'developer', status: 'waiting_user_answer' },
+      { id: 'd4', label: 'retrospector', status: 'completed' }
+    ];
+    cast.forEach((c, i) => {
+      setTimeout(() => {
+        const n = makeNode({ id: c.id, agent_profile: c.label, status: c.status }, 'demo');
+        if (i === 3) n.parent = 'a1';
+        nodes.set(c.id, n);
+        layout();
+        corePulse = 1;
+        eventCount++;
+        note('launch', `${c.label} joined`);
+        paintState();
+      }, 400 + i * 700);
+    });
+
+    const kinds = ['handoff', 'handoff', 'a2a_delegation', 'completion', 'error'];
+    setInterval(() => {
+      const ids = [...nodes.keys()];
+      if (!ids.length) return;
+      const kind = kinds[Math.floor(Math.random() * kinds.length)];
+      const to = ids[Math.floor(Math.random() * ids.length)];
+      const fromCore = kind === 'handoff';
+      const from = fromCore ? null : ids[Math.floor(Math.random() * ids.length)];
+      if (!fromCore && from === to) return;
+      send(from, to, kind);
+      if (fromCore) corePulse = 1;
+      note(kind,
+        kind === 'completion' ? `${nameOf(to)} finished`
+        : kind === 'error' ? `${nameOf(to)} failed`
+        : `${nameOf(from)} → ${nameOf(to)}  ${KIND[kind].verb}`);
+      eventCount++;
+      paintState();
+    }, 1900);
+  }
+
+  /* ---------- boot ------------------------------------------------------- */
+
+  resize();
+  paintState();
+  requestAnimationFrame(frame);
+  askToNotify();   // most browsers ignore this outside a gesture; harmless when they do
+
+  // Subscription usage is about the account, not the fleet, so it is read even
+  // in preview mode -- where its absence just looked like a bug.
+  pollUsage();
+  setInterval(pollUsage, 60000);
+
+  if (location.search.includes('demo')) {
+    runDemo();
+  } else {
+    // Fleet first, then the stream: the ticker's backfill turns terminal ids
+    // into agent names, and it can only do that once the nodes are known.
+    pollFleet().then(connectEvents);
+    setInterval(pollFleet, 2500);
+  }
+})();
+</script>
+</body>
+</html>

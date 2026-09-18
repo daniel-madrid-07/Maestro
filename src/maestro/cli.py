@@ -29,6 +29,7 @@ from maestro import __version__, config
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 CLAUDE_JSON = Path.home() / ".claude.json"
 SKILL_DIR = CLAUDE_DIR / "skills" / "maestro"
+AGENTS_DIR = CLAUDE_DIR / "agents"
 
 UP_TIMEOUT = 20.0
 DOWN_TIMEOUT = 10.0
@@ -295,6 +296,13 @@ def cmd_init(args) -> int:
 
     skill = _packaged("skill", "SKILL.md").read_text(encoding="utf-8")
     _say(f"skill {SKILL_DIR / 'SKILL.md'}: {_write(SKILL_DIR / 'SKILL.md', skill, force)}")
+
+    # The `worker` profile tells its agent to send every lookup to a `scout`
+    # subagent, which only exists if we install it.
+    for src in sorted(_packaged("agents").iterdir(), key=lambda p: p.name):
+        if src.name.endswith(".md"):
+            what = _write(AGENTS_DIR / src.name, src.read_text(encoding="utf-8"), force)
+            _say(f"subagent {src.name}: {what}")
 
     status = 0
     add = ["mcp", "add-json", "--scope", "user", "maestro", mcp_json()]

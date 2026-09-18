@@ -1,130 +1,95 @@
+<div align="center">
+
+<img src="src/maestro/panel/icon.svg" alt="Maestro logo" width="132">
+
 # Maestro
 
-Muchas sesiones completas de Claude Code corriendo en tmux, dirigidas por una
-de ellas o por Claude desde VS Code. Es la versión propia y reducida de lo que
-CAO hace en este equipo: solo Claude Code, solo tmux, solo lo que se usa.
+**Run a dozen Claude Code sessions at once, and let one of them conduct the rest.**
 
-~1.500 líneas de Python, sin base de datos, sin framework web, dos dependencias
-(`mcp` para los servidores MCP y `pyyaml` para los perfiles).
+Each agent is a full Claude Code process in its own tmux window — not a subagent, not an API call. Maestro launches them, reads their screens to know what they are doing, carries messages between them, and draws the whole fleet on a live panel.
 
-## Piezas
+[![Latest release](https://img.shields.io/github/v/release/daniel-madrid-07/Maestro?include_prereleases&label=release&color=d97757)](https://github.com/daniel-madrid-07/Maestro/releases)
+[![Python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL-1f6feb)](#requirements)
+[![License](https://img.shields.io/badge/license-MIT-8bc34a)](LICENSE)
 
-| Proceso | Qué es |
+</div>
+
+---
+
+## What it does
+
+Claude Code can spawn subagents, but a subagent shares your context window and dies with your turn. Maestro runs **real sessions** instead: separate processes, separate context, separate conversation, all alive at the same time. You keep working in your editor while eight of them build eight parts of your project.
+
+The orchestrator can be Claude itself. Point Claude Code at the `maestro` MCP server and it can launch workers, hand them briefs, poll their status, read their answers, answer their questions and close them — from the session you are already talking to. Or drive it by hand with `maestro status` and the CLI.
+
+Knowing what an agent is doing is the hard part, and Maestro does it the way a person would: it reads the rendered terminal. A spinner means working, an option list means it is waiting for an answer, a finished response means the turn is done. No log parsing, no hooks, no cooperation needed from the agent.
+
+## Features
+
+- **Full sessions, not subagents** — one Claude Code process per worker, in its own tmux window, with its own context and its own conversation
+- **Agents that delegate** — every session gets an MCP bridge: `assign` a worker without waiting, `handoff` and block for the answer, `send_message` to reply to whoever called you
+- **Unstick a worker without touching the keyboard** — `answer_prompt` answers the question it is blocked on, `interrupt` stops a turn that is going in circles, `restart_terminal` gives it a fresh Claude with the same id, directory and queue
+- **Isolated git worktrees** — `use_worktree` puts a worker on its own branch in its own checkout, so ten agents on one repository never trample each other; merge with plain git when they are done, and nothing uncommitted is ever thrown away
+- **Live panel** — the fleet as a ring of agents around the conductor, wires that light up when a message crosses, a ticker of what just happened, and the state of every agent in its glyph. Installs as a desktop app (PWA); works offline
+- **It tells you when it needs you** — system notifications when an agent asks a question, dies, or freezes for ten minutes with nothing changing on screen
+- **Progress you can trust** — agents report their own percentage (`report_progress`); hover a worker to read it, hover the mark for the fleet's mean. No report, no invented number
+- **Survives a restart** — the server re-adopts the tmux sessions that are still alive, and keeps a note of worktrees whose agent is gone so their work can still be merged
+- **Small enough to read** — about 2,000 lines of Python, two dependencies, no database, no web framework
+
+## Installation / Usage
+
+```bash
+uv tool install git+https://github.com/daniel-madrid-07/Maestro
+maestro init      # config, profiles, the skill, and the MCP server in Claude Code
+maestro doctor    # checks tmux, claude, the port and the registration
+maestro up        # starts the server and opens the panel
+```
+
+`pipx install git+https://github.com/daniel-madrid-07/Maestro` works the same way.
+
+Then, in any project, tell Claude Code what you want built:
+
+> Orchestrate this with Maestro: split it into as many workers as it genuinely divides into, review at the end, and close the sessions when you are done.
+
+Claude launches the fleet, and you watch it on <http://127.0.0.1:9889>.
+
+### Commands
+
+| | |
 |---|---|
-| `maestro-server` | API HTTP en `127.0.0.1:9889`. Crea sesiones tmux, arranca Claude en cada ventana, vigila cada pantalla (estado) y entrega los mensajes en cola cuando la sesión está libre. Emite eventos por SSE para el panel. |
-| `maestro-ops` | Servidor MCP para el orquestador externo (Claude en VS Code). Mismos nombres de herramientas que `cao-ops-mcp`: `launch_session`, `send_session_message`, `get_terminal_status`, `get_terminal_output`, `read_session_output`, `list_sessions`, `get_session_info`, `shutdown_session`, `list_profiles`. |
-| `maestro-agent` | Servidor MCP que recibe cada sesión lanzada: `assign` (worker sin esperar), `handoff` (worker esperando la respuesta), `send_message`, `list_terminals`, `delete_terminal`, `get_terminal_status`, `get_terminal_output`. |
+| `maestro up` | start the server, open the panel (`--foreground`, `--no-open`) |
+| `maestro status` | every session and terminal, with status, progress and branch (`--json`) |
+| `maestro doctor` | what is missing and how to fix it |
+| `maestro down` | stop the server; running sessions stay up in tmux |
+| `maestro init` | set up `~/.maestro`, the profiles, the skill and the MCP registration (`--force`) |
 
-Los dos servidores MCP tienen además las **herramientas de control**:
-`answer_prompt(terminal_id, answer)` (solo con estado `waiting_user_answer`:
-una tecla, un dígito que elige esa opción, o texto), `interrupt(terminal_id)`
-(Esc, para un worker dando vueltas) y `restart_terminal(terminal_id)` (mismo
-id, perfil, modelo, carpeta y cola; Claude nuevo, conversación perdida).
+### Requirements
 
-**Worktrees:** `use_worktree=true` en `launch_session`, `assign` o `handoff`
-da al worker su propio checkout en `~/.maestro/worktrees/<repo>-<id>` sobre la
-rama `mx/<id>`; el worker recibe la orden de hacer commit ahí. Se fusiona con
-git normal (`git -C <repo> merge mx/<id>`); `list_worktrees` (ops) lista lo que
-hay por fusionar, incluidos los checkouts huérfanos de un servidor anterior
-(`remove_worktree` los quita). Al borrar el terminal, lo que quedara sin
-commit se commitea en la rama, se elimina el checkout, y la rama solo se borra
-si está fusionada. Nunca se pierde trabajo.
+| | |
+|---|---|
+| **Python** | 3.11 or newer |
+| **tmux** | 3.0 or newer — every agent lives in a tmux window |
+| **Claude Code** | installed and signed in (`claude` on `PATH`) |
+| **OS** | Linux, macOS, or Windows through WSL. There is no native Windows build: tmux is not optional |
 
-**Progreso:** cada agente informa del suyo con `report_progress(percent, note)`
-(los perfiles se lo piden al empezar, en cada hito y al terminar); queda en
-`progress` del terminal y como evento `terminal_progress`. El panel lo muestra
-al pasar el ratón por un worker, y sobre el logo central la media de la flota.
-Un worker `completed` sin informe cuenta como 100; uno en marcha sin informe
-muestra "—". No se inventa nada: sin informe no hay número.
+### Profiles
 
-**Avisos:** el servidor emite `waiting` (un worker ha hecho una pregunta),
-`stuck` (lleva `MAESTRO_STUCK_AFTER` s, por defecto 600, en `processing` sin
-que la pantalla cambie, descontando el spinner) y `error` (Claude salió). El
-panel los muestra en el ticker y lanza notificaciones del sistema (pide
-permiso al pulsar el logo).
+An agent profile is a Markdown file with YAML front matter: model, effort, MCP servers and the system prompt appended to Claude's own. Three ship with Maestro — `worker` (delegates lookups to a cheap scout subagent), `reviewer`, and `code_supervisor` (runs its own workers). Copies land in `~/.maestro/profiles/`, and a file you edit there wins over the packaged one.
 
-Perfiles (Markdown con front matter YAML, mismo formato que CAO) en
-`src/maestro/profiles/`: `worker`, `code_supervisor`, `reviewer`. Una copia con
-el mismo nombre en `~/.maestro/profiles/` tiene prioridad.
+## Architecture
 
-## Cómo funciona una sesión
+- **`maestro-server`** — the HTTP API. Owns the tmux sessions, starts Claude in each pane, reads every screen once a second to classify its state, delivers queued messages when an agent is free, streams events over SSE, and serves the panel.
+- **`maestro-ops`** — the MCP server the outside orchestrator (Claude Code in your editor) talks to: `launch_session`, `send_session_message`, `get_terminal_status`, `get_terminal_output`, `answer_prompt`, `interrupt`, `restart_terminal`, `list_worktrees`, `shutdown_session`.
+- **`maestro-agent`** — the MCP server every launched session gets, so agents can build their own sub-fleets: `assign`, `handoff`, `send_message`, `report_progress`, `list_terminals`, `delete_terminal`.
+- **The panel** — a single HTML file served by the server: canvas for the field and the wires, DOM for the labels, SSE for the traffic.
 
-1. `POST /sessions` → ventana tmux (`mx-<nombre>`) con `MAESTRO_TERMINAL_ID` y
-   `MAESTRO_URL` en su entorno.
-2. Antes de arrancar Claude, la carpeta se marca como confiable en
-   `~/.claude.json` y se activa `skipDangerousModePermissionPrompt` en
-   `~/.claude/settings.json`, así no aparece ningún diálogo. Si aun así aparece
-   uno, se contesta (con un segundo de margen para que el renderizador acepte
-   teclas).
-3. `claude --dangerously-skip-permissions --model … --effort … --append-system-prompt-file … --mcp-config … --strict-mcp-config`
-   (variables `CLAUDE*` heredadas se limpian antes).
-4. Cuando el banner y la caja de entrada están en pantalla dos capturas
-   seguidas, la terminal está lista y se entrega el primer mensaje.
-5. Cada segundo se captura la pantalla y se clasifica: `processing` (spinner),
-   `waiting_user_answer` (menú de opciones), `completed` (respuesta nueva en
-   pantalla con la caja de entrada visible), `idle`, `error` (Claude salió).
-6. Los mensajes van a una cola por terminal y se pegan (bracketed paste +
-   Enter) solo cuando la terminal está `idle`/`completed`.
+State lives in `~/.maestro/` (config, profiles, logs, worktrees, `state.json`). Nothing leaves your machine except Claude Code's own traffic.
 
-Al reiniciar el servidor, `~/.maestro/state.json` permite readoptar las
-sesiones tmux que sigan vivas.
+## Tech stack
 
-## Instalación (WSL)
+Python 3.11 (standard library — `http.server`, `subprocess`, `threading`), [tmux](https://github.com/tmux/tmux), [Claude Code](https://claude.com/claude-code), the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk), PyYAML, and plain HTML/Canvas for the panel.
 
-```bash
-uv tool install --editable "/mnt/c/ALL/Coding/Claude Sessions/maestro"
-# → ~/.local/bin/maestro-server, maestro-ops, maestro-agent
-```
+## License
 
-Registrar el MCP para VS Code (Windows):
-
-```
-claude mcp add-json --scope user maestro-ops '{"command":"wsl.exe","args":["-d","Ubuntu","--","bash","-lc","/home/daniel/.local/bin/maestro-ops"]}'
-```
-
-## Arranque
-
-`Iniciar Maestro.lnk` (o `start-maestro.bat`) arranca el panel con
-`PANEL_SERVER_BIN=~/.local/bin/maestro-server`; el panel es el mismo que con
-CAO. CAO y Maestro usan el mismo puerto: solo uno de los dos a la vez.
-
-## API
-
-```
-GET  /health
-GET  /sessions                          POST /sessions        {agent_profile, session_name, working_directory, model, initial_message, wait}
-GET  /sessions/{n}                      DELETE /sessions/{n}
-GET  /sessions/{n}/terminals            POST /sessions/{n}/terminals  {agent_profile, working_directory, model, caller_id, initial_message, wait}
-GET  /terminals/{id}                    DELETE /terminals/{id}
-POST /terminals/{id}/input {message}    POST /terminals/{id}/inbox/messages {message, sender_id}
-POST /terminals/{id}/answer {answer}    POST /terminals/{id}/interrupt        POST /terminals/{id}/restart
-POST /terminals/{id}/progress {percent, note}
-GET  /terminals/{id}/output?mode=full|last
-GET  /events (SSE)                      GET /events/history?limit=
-GET  /agents/profiles                   GET /agents/profiles/{name}
-```
-
-## Lo que no tiene (a propósito)
-
-Otros proveedores (Kiro, Codex, Kimi, Copilot…), Kubernetes y nodos remotos,
-workflows, memoria compartida, autenticación, plugins, TUI, base de datos. Si
-algún día hace falta, se añade en el sitio obvio.
-
-## Tests
-
-```bash
-cd "/mnt/c/ALL/Coding/Claude Sessions/maestro"
-~/.local/share/uv/tools/maestro/bin/python -m unittest discover -s tests -v
-```
-
-Las fixtures de `tests/fixtures/` son capturas reales de tmux de sesiones
-lanzadas por Maestro (Claude Code 2.1.276). Si una versión nueva de Claude
-cambia la interfaz y la detección falla, captura la pantalla nueva
-(`tmux capture-pane -p -t <pane> -S -60`), guárdala ahí y ajusta los patrones
-de `claude.py`.
-
-## Notas
-
-- `mcp` está fijado a `<2`: la 2.x renombró `FastMCP` a `MCPServer`.
-- El código es editable en su sitio (`uv tool install --editable`): tras un
-  cambio basta con reiniciar `maestro-server`; responde a SIGTERM y sale limpio.
+MIT — see [LICENSE](LICENSE). The terminal-state heuristics are adapted from [awslabs/cli-agent-orchestrator](https://github.com/awslabs/cli-agent-orchestrator) (Apache-2.0); see [NOTICE](NOTICE).

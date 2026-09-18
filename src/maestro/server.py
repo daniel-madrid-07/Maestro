@@ -258,8 +258,7 @@ class Handler(BaseHTTPRequestHandler):
         if head == "health" and method == "GET":
             return self._json(200, {"ok": True, "maestro": True, "version": __version__, "sessions": len(fleet.sessions), "terminals": len(fleet.terminals)})
 
-        # /control/usage is the path the panel used behind its old proxy.
-        if method == "GET" and (segs == ["usage"] or segs == ["control", "usage"]):
+        if segs == ["usage"] and method == "GET":
             return self._json(200, read_usage())
 
         if head == "events" and method == "GET":

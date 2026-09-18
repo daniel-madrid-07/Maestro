@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # The suite mocks tmux and the network, but worktree.py drives real git.
+      - run: git config --global user.email ci@example.com && git config --global user.name ci
+      - run: pip install .
+      - run: python -m unittest discover -s tests -v
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      # The panel and the profiles are data files: a wheel without them installs
+      # and then serves nothing, so fail here rather than on someone's machine.
+      - name: the wheel carries the panel, the profiles and the skill
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          need = ["maestro/panel/index.html", "maestro/panel/manifest.webmanifest",
+                  "maestro/profiles/worker.md", "maestro/skill/SKILL.md"]
+          missing = [n for n in need if n not in names]
+          fonts = [n for n in names if n.startswith("maestro/panel/fonts/")]
+          print(wheel, len(names), "entries,", len(fonts), "font files")
+          if missing or not fonts:
+              sys.exit(f"missing from the wheel: {missing or 'fonts'}")
+          PY

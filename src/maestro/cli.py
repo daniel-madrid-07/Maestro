@@ -90,14 +90,16 @@ def _read_pid() -> int | None:
         return None
     except PermissionError:
         pass
-    # A reused pid belongs to something else; /proc tells us where it exists.
-    cmdline = Path(f"/proc/{pid}/cmdline")
-    if cmdline.exists():
-        try:
-            if b"maestro" not in cmdline.read_bytes():
-                return None
-        except OSError:
-            pass
+    # A reused pid belongs to something else, and `down` is about to signal it.
+    # `ps` answers the same question as /proc/<pid>/cmdline and exists on macOS
+    # too, where /proc does not (and where the check silently passed before).
+    try:
+        ps = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+                            capture_output=True, text=True, timeout=10)
+        if ps.returncode == 0 and ps.stdout.strip() and "maestro" not in ps.stdout:
+            return None
+    except (OSError, subprocess.SubprocessError):
+        pass  # no ps: fall back to trusting the pid file, as before
     return pid
 
 

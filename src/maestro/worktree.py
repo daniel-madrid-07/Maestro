@@ -52,7 +52,12 @@ def create(working_directory: str, terminal_id: str) -> Worktree:
 def _commit_leftovers(worktree: Worktree) -> bool:
     """Commit whatever the worker left uncommitted, so removing the checkout loses nothing."""
     dirty = _git("-C", worktree.path, "status", "--porcelain")
-    if dirty.returncode != 0 or not dirty.stdout.strip():
+    if dirty.returncode != 0:
+        # "I could not look" is not "there is nothing there". Saying so stops
+        # remove() from force-deleting a checkout whose state is unknown --
+        # a transient git failure would otherwise destroy uncommitted work.
+        raise RuntimeError(f"git status failed: {dirty.stderr.strip() or dirty.returncode}")
+    if not dirty.stdout.strip():
         return False
     _git("-C", worktree.path, "add", "-A")
     # An explicit identity: the repo may have none configured, and a failed
@@ -73,7 +78,13 @@ def remove(worktree: Worktree) -> dict:
     result = {"removed": False, "branch_kept": True, "committed": False, "reason": None}
     try:
         if os.path.isdir(worktree.path):
-            result["committed"] = _commit_leftovers(worktree)
+            try:
+                result["committed"] = _commit_leftovers(worktree)
+            except RuntimeError as exc:
+                # Unknown state: keep the checkout. An orphaned directory can be
+                # inspected and removed by hand; deleted work cannot come back.
+                result["reason"] = f"kept at {worktree.path}: {exc}"
+                return result
         gone = _git("-C", worktree.repo, "worktree", "remove", "--force", worktree.path)
         _git("-C", worktree.repo, "worktree", "prune")
         result["removed"] = not os.path.exists(worktree.path)

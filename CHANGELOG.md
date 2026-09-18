@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.1 — 2026-09-18
+
+Found by a fleet of nine agents auditing the repository through Maestro itself.
+
+### Fixed
+
+- **A page in your browser could drive the API** (security). The server sent
+  `Access-Control-Allow-Origin: *` on an API with no authentication that starts
+  processes, so any site open in the same browser could launch sessions in any
+  directory, feed them prompts and read their output. No CORS headers are sent
+  any more, a request carrying a foreign `Origin` is refused, and a body must
+  be declared `application/json` so a form post cannot slip past without a
+  preflight.
+- **A worker's uncommitted work could be deleted.** When `git status` failed
+  for any reason — a slow or flaky filesystem is enough — the worktree was
+  treated as clean and force-removed. An unreadable checkout is now kept, with
+  the reason reported.
+- **`maestro down` could signal an unrelated process on macOS.** The "is this
+  pid really the server?" check read `/proc`, which does not exist there, so it
+  was silently skipped. It uses `ps` now.
+- The panel labelled every agent with its profile, so a fleet of eight read as
+  eight identical `worker`s. The label is the task now; the profile and model
+  are one click away. Progress events name the agent and carry their note.
+- README: `maestro open` was missing from the command table and both MCP tool
+  lists were incomplete.
+
 ## 0.1.0 — 2026-09-18
 
 First public release.

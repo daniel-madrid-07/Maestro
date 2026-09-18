@@ -12,4 +12,4 @@ The wire format is kept compatible with the parts of CAO the panel and the
 ``/events`` routes, the same event ``kind`` vocabulary.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

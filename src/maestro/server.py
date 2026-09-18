@@ -40,11 +40,13 @@ from maestro.fleet import InitError, NotReady, fleet
 
 log = logging.getLogger("maestro.server")
 
-CORS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-}
+# No CORS headers, on purpose. The panel is served by this same server, so it
+# is same-origin and needs none; the MCP servers are ordinary local clients and
+# CORS does not apply to them. Sending `Access-Control-Allow-Origin: *` on an
+# API with no auth that starts processes would let ANY page the operator has
+# open in their browser drive the fleet -- the classic localhost drive-by.
+# `_same_origin_only` below closes the other half of that hole.
+ALLOWED_CONTENT_TYPES = ("application/json", "")
 
 
 def _truthy(value) -> bool:
@@ -186,8 +188,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        for k, v in CORS.items():
-            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -214,10 +214,33 @@ class Handler(BaseHTTPRequestHandler):
                 params.update(body)
         return params
 
+    def _same_origin_only(self) -> bool:
+        """Refuse anything a web page on another origin sent us.
+
+        A browser attaches ``Origin`` to every cross-origin request and to every
+        POST; a page that is not our own panel therefore cannot get past this,
+        even for a "simple" request that needs no preflight. Local clients
+        (the MCP servers, curl, the CLI) send no ``Origin`` at all and are
+        unaffected. Belt to that: a body must be declared JSON, which a form
+        post from a hostile page cannot claim without a preflight.
+        """
+        origin = self.headers.get("Origin")
+        if origin:
+            host = self.headers.get("Host") or ""
+            if origin not in (f"http://{host}", f"https://{host}"):
+                self._json(403, {"detail": "cross-origin requests are refused"})
+                return False
+        if self.command in ("POST", "PUT", "PATCH"):
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype not in ALLOWED_CONTENT_TYPES:
+                self._json(415, {"detail": "send application/json"})
+                return False
+        return True
+
     def do_OPTIONS(self):
-        self.send_response(204)
-        for k, v in CORS.items():
-            self.send_header(k, v)
+        # Nothing to negotiate: there is no cross-origin access to grant.
+        self.send_response(405)
+        self.send_header("Allow", "GET, POST, DELETE")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -234,6 +257,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path.rstrip("/") or "/"
         segs = path.split("/")[1:]
         try:
+            if not self._same_origin_only():
+                return
             handled = self._dispatch(method, segs)
             if handled is None:
                 self._json(404, {"detail": f"no route for {method} {path}"})
@@ -368,8 +393,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        for k, v in CORS.items():
-            self.send_header(k, v)
         self.end_headers()
         self.close_connection = True
         try:

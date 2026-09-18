@@ -68,8 +68,9 @@ Claude launches the fleet, and you watch it on <http://127.0.0.1:9889>.
 | `maestro up` | start the server, open the panel (`--foreground`, `--no-open`) |
 | `maestro status` | every session and terminal, with status, progress and branch (`--json`) |
 | `maestro doctor` | what is missing and how to fix it |
+| `maestro open` | open the panel in the browser |
 | `maestro down` | stop the server; running sessions stay up in tmux |
-| `maestro init` | set up `~/.maestro`, the profiles, the skill and the MCP registration (`--force`) |
+| `maestro init` | set up `~/.maestro`, the profiles, the skill, the scout subagent and the MCP registration (`--force`) |
 
 ### Requirements
 
@@ -87,11 +88,13 @@ An agent profile is a Markdown file with YAML front matter: model, effort, MCP s
 ## Architecture
 
 - **`maestro-server`** — the HTTP API. Owns the tmux sessions, starts Claude in each pane, reads every screen once a second to classify its state, delivers queued messages when an agent is free, streams events over SSE, and serves the panel.
-- **`maestro-ops`** — the MCP server the outside orchestrator (Claude Code in your editor) talks to: `launch_session`, `send_session_message`, `get_terminal_status`, `get_terminal_output`, `answer_prompt`, `interrupt`, `restart_terminal`, `list_worktrees`, `shutdown_session`.
-- **`maestro-agent`** — the MCP server every launched session gets, so agents can build their own sub-fleets: `assign`, `handoff`, `send_message`, `report_progress`, `list_terminals`, `delete_terminal`.
+- **`maestro-ops`** — the MCP server the outside orchestrator (Claude Code in your editor) talks to, registered as `maestro`: `launch_session`, `send_session_message`, `read_session_output`, `get_terminal_status`, `get_terminal_output`, `answer_prompt`, `interrupt`, `restart_terminal`, `list_sessions`, `get_session_info`, `list_profiles`, `get_profile_details`, `list_worktrees`, `remove_worktree`, `shutdown_session`.
+- **`maestro-agent`** — the MCP server every launched session gets, so agents can build their own sub-fleets: `assign`, `handoff`, `send_message`, `report_progress`, `list_terminals`, `get_terminal_status`, `get_terminal_output`, `answer_prompt`, `interrupt`, `restart_terminal`, `delete_terminal`.
 - **The panel** — a single HTML file served by the server: canvas for the field and the wires, DOM for the labels, SSE for the traffic.
 
 State lives in `~/.maestro/` (config, profiles, logs, worktrees, `state.json`). Nothing leaves your machine except Claude Code's own traffic.
+
+The API binds loopback and has no authentication, because it is a local tool. It sends no CORS headers and refuses any request carrying a foreign `Origin`, so a page you happen to have open in your browser cannot reach it. Do not expose the port.
 
 ## Tech stack
 

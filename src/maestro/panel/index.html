@@ -664,11 +664,13 @@
   function makeNode(t, sessionName) {
     return {
       id: t.id,
-      label: t.agent_profile || t.name || t.id,
+      label: labelFor(t, sessionName),
       session: sessionName,
       parent: t.caller_id || null,
       status: t.status || 'unknown',
-      titled: false,      // its task title is shown only when asked for
+      model: t.model || '',
+      profile: t.agent_profile || '',
+      titled: false,      // the profile and model are shown only when asked for
       progress: progressOf(t),
       stuck: !!t.stuck,   // processing, but the screen has not moved for minutes
       born: performance.now(),
@@ -750,7 +752,8 @@
             existing.stuck = !!t.stuck;
             existing.progress = progressOf(t);
             existing.parent = t.caller_id || existing.parent;
-            existing.label = t.agent_profile || existing.label;
+            existing.label = labelFor(t, name);
+            existing.profile = t.agent_profile || existing.profile;
           } else {
             nodes.set(t.id, makeNode(t, name));
             // Sessions already running when the panel opens did not just join;
@@ -822,6 +825,7 @@
           : kind === 'completion' ? `${nameOf(ev.terminal_id)} finished`
           : kind === 'error' ? `${nameOf(ev.terminal_id)} failed`
           : kind === 'waiting' || kind === 'stuck' ? `${labelOf(ev)} ${KIND[kind].verb}`
+          : d.event_type === 'terminal_progress' ? `${labelOf(ev)} ${d.percent}%${d.note ? ' — ' + d.note : ''}`
           : kind === 'other' ? `${labelOf(ev)} ${String(d.event_type || 'event').replace(/^terminal_/, '')}`
           : `${senderName(d.sender)} → ${nameOf(d.receiver || ev.terminal_id)}`,
           ev.timestamp);
@@ -926,6 +930,10 @@
       notify(kind, ev);
     } else if (kind === 'file_mod') {
       note(kind, `${nameOf(ev.terminal_id)} touched files`);
+    } else if (d.event_type === 'terminal_progress') {
+      const n = nodes.get(ev.terminal_id);
+      if (n && typeof d.percent === 'number') n.progress = d.percent;
+      note(kind, `${labelOf(ev)} ${d.percent}%${d.note ? ' — ' + d.note : ''}`);
     }
 
     const n = nodes.get(ev.terminal_id);
@@ -1165,7 +1173,7 @@
       n._state = el.querySelector('.tag__state');
     }
     if (n._name.textContent !== n.label) n._name.textContent = n.label;
-    const title = bareName(n.session);
+    const title = [n.profile, n.model].filter(Boolean).join(' · ') || n.id;
     if (n._title.textContent !== title) n._title.textContent = title;
     const titled = n.titled ? '1' : '0';
     if (n.el.dataset.titled !== titled) n.el.dataset.titled = titled;
@@ -1272,6 +1280,16 @@
      is by distance to the glyph, or by the label's box. */
 
   const bareName = (session) => String(session || '').replace(/^(?:cao|mx)-/, '');
+
+  // What an agent is ON matters more at a glance than which profile it runs,
+  // so the task (its session name) is the label. A session named after nothing
+  // in particular falls back to the profile. The profile and model are one
+  // click away.
+  function labelFor(t, sessionName) {
+    const task = bareName(sessionName);
+    const generic = !task || /^s-[0-9a-f]{6}$/.test(task);
+    return generic ? (t.agent_profile || t.name || t.id) : task;
+  }
 
   function nodeAt(x, y) {
     for (const n of nodes.values()) {

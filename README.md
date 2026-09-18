@@ -13,6 +13,10 @@ Each agent is a full Claude Code process in its own tmux window — not a subage
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL-1f6feb)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-8bc34a)](LICENSE)
 
+<img src="docs/panel.png" alt="The Maestro panel: nine Claude Code agents around the conductor, wires carrying their traffic, and a ticker of what each one just reported" width="100%">
+
+<sub>Nine agents auditing this repository, live. The ring is the fleet, the dust on each wire is its traffic, and the ticker is what they just reported.</sub>
+
 </div>
 
 ---
@@ -34,6 +38,9 @@ Knowing what an agent is doing is the hard part, and Maestro does it the way a p
 - **Live panel** — the fleet as a ring of agents around the conductor, wires that light up when a message crosses, a ticker of what just happened, and the state of every agent in its glyph. Installs as a desktop app (PWA); works offline
 - **It tells you when it needs you** — system notifications when an agent asks a question, dies, or freezes for ten minutes with nothing changing on screen
 - **Progress you can trust** — agents report their own percentage (`report_progress`); hover a worker to read it, hover the mark for the fleet's mean. No report, no invented number
+
+  <img src="docs/panel-hover-agent.png" alt="Hovering an agent shows the percentage it last reported" width="420">
+
 - **Survives a restart** — the server re-adopts the tmux sessions that are still alive, and keeps a note of worktrees whose agent is gone so their work can still be merged
 - **Small enough to read** — about 2,000 lines of Python, two dependencies, no database, no web framework
 

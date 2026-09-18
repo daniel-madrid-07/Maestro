@@ -13,9 +13,9 @@ Each agent is a full Claude Code process in its own tmux window — not a subage
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL-1f6feb)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-8bc34a)](LICENSE)
 
-<img src="docs/panel.png" alt="The Maestro panel: nine Claude Code agents around the conductor, wires carrying their traffic, and a ticker of what each one just reported" width="100%">
+<img src="docs/panel.gif" alt="The Maestro panel: agents around the conductor, wires lighting up as messages cross, a new agent joining the ring, and a ticker of what each one just reported" width="100%">
 
-<sub>Nine agents auditing this repository, live. The ring is the fleet, the dust on each wire is its traffic, and the ticker is what they just reported.</sub>
+<sub>Real recording: eight agents auditing this repository. Each wire lights up when a message crosses it, the mark pulses as a new agent joins, and the ticker carries what they just reported.</sub>
 
 </div>
 

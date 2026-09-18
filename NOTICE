@@ -1,0 +1,8 @@
+Maestro is an original, from-scratch implementation.
+
+The Claude Code screen-reading heuristics in src/maestro/claude.py (the
+spinner, prompt-box, dialog and completion patterns) are ported from
+awslabs/cli-agent-orchestrator (https://github.com/awslabs/cli-agent-orchestrator),
+Copyright Amazon.com, Inc. or its affiliates, licensed under the Apache License,
+Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). The rest of the
+project shares no code with it.

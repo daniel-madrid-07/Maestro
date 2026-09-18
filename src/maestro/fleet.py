@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from maestro import claude, config, events, profiles, tmux
+from maestro import worktree as worktrees
 
 log = logging.getLogger("maestro.fleet")
 
@@ -52,6 +53,7 @@ class Terminal:
     model: str | None = None
     caller_id: str | None = None
     created: str = field(default_factory=now_iso)
+    worktree: worktrees.Worktree | None = None
     # live state, never persisted
     ready: bool = False
     failed: str | None = None
@@ -74,6 +76,7 @@ class Terminal:
             "caller_id": self.caller_id,
             "model": self.model,
             "working_directory": self.cwd,
+            "worktree": self.worktree.public() if self.worktree else None,
             "pane": self.pane,
             "status": self.status,
             "ready": self.ready,
@@ -84,10 +87,12 @@ class Terminal:
         }
 
     def persisted(self) -> dict:
-        return {
+        data = {
             k: getattr(self, k)
             for k in ("id", "name", "session", "pane", "agent_profile", "cwd", "model", "caller_id", "created")
         }
+        data["worktree"] = self.worktree.public() if self.worktree else None
+        return data
 
 
 @dataclass
@@ -134,7 +139,8 @@ class Fleet:
             if session.tmux in live:
                 self.sessions[session.name] = session
         for t in data.get("terminals", []):
-            term = Terminal(**t)
+            wt = t.pop("worktree", None)
+            term = Terminal(**t, worktree=worktrees.Worktree(**wt) if wt else None)
             if term.session in self.sessions and tmux.pane_alive(term.pane):
                 term.ready = True
                 term.dispatched = True  # its history is unknown; trust the screen
@@ -204,12 +210,15 @@ class Fleet:
         orchestration_type: str | None = None,
         sender_id: str | None = None,
         wait: bool = False,
+        use_worktree: bool = False,
     ) -> Terminal:
         """Open a window running Claude Code, in a new or existing session.
 
         Returns as soon as the window exists; Claude starts in the background
         and ``initial_message`` is delivered once it is ready. With ``wait``
         the call blocks until then and raises InitError on failure.
+        With ``use_worktree`` the terminal runs in its own git worktree on
+        branch ``mx/<terminal_id>`` (see maestro.worktree).
         """
         if not NAME_RE.match(session_name or ""):
             raise ValueError("session_name must match [A-Za-z0-9][A-Za-z0-9_.-]{0,59}")
@@ -228,19 +237,34 @@ class Fleet:
                 raise ValueError(f"caller terminal '{caller_id}' not found")
 
             terminal_id = uuid.uuid4().hex[:8]
+            wt = None
+            if use_worktree:
+                wt = worktrees.create(cwd, terminal_id)
+                cwd = wt.path
+                if initial_message:
+                    initial_message += (
+                        f"\n\n[You are working in an isolated git worktree on branch {wt.branch} at {wt.path}. "
+                        "Commit your work on this branch before you report; the orchestrator merges it into the main branch.]"
+                    )
             window = f"{profile.name}-{terminal_id[:4]}"
             env = {
                 "MAESTRO_TERMINAL_ID": terminal_id,
                 "MAESTRO_URL": config.URL,
                 "PATH": config.pinned_path(),
             }
-            if new_session or not tmux.has_session(session.tmux):
-                pane = tmux.new_session(session.tmux, window, cwd, env)
-            else:
-                pane = tmux.new_window(session.tmux, window, cwd, env)
+            try:
+                if new_session or not tmux.has_session(session.tmux):
+                    pane = tmux.new_session(session.tmux, window, cwd, env)
+                else:
+                    pane = tmux.new_window(session.tmux, window, cwd, env)
+            except Exception:
+                if wt:
+                    worktrees.remove(wt)
+                raise
             term = Terminal(
                 id=terminal_id, name=window, session=session.name, pane=pane,
                 agent_profile=profile.name, cwd=cwd, model=model, caller_id=caller_id,
+                worktree=wt,
             )
             self.sessions[session.name] = session
             self.terminals[terminal_id] = term
@@ -362,7 +386,10 @@ class Fleet:
         if not remaining:
             self._kill_session(term.session)
         self.save()
-        return {"success": True, "terminal_id": terminal_id}
+        result = {"success": True, "terminal_id": terminal_id}
+        if term.worktree:
+            result["worktree"] = {**term.worktree.public(), **worktrees.remove(term.worktree)}
+        return result
 
     def _kill_session(self, name: str) -> None:
         with self._lock:

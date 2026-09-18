@@ -4,7 +4,7 @@ The routes the panel and the two MCP servers use mirror CAO's names so the
 existing panel works unchanged:
 
     GET    /health
-    GET    /sessions                      POST /sessions?agent_profile=&session_name=&working_directory=&model=&wait=
+    GET    /sessions                      POST /sessions?agent_profile=&session_name=&working_directory=&model=&wait=&use_worktree=
     GET    /sessions/{name}               DELETE /sessions/{name}
     GET    /sessions/{name}/terminals     POST /sessions/{name}/terminals   (json body)
     GET    /terminals/{id}                DELETE /terminals/{id}
@@ -142,6 +142,7 @@ class Handler(BaseHTTPRequestHandler):
                         model=p.get("model"), initial_message=p.get("initial_message"),
                         orchestration_type=p.get("orchestration_type"), sender_id=p.get("sender_id"),
                         wait=_truthy(p.get("wait", "false")),
+                        use_worktree=_truthy(p.get("use_worktree", "false")),
                     )
                     return self._json(201, term.public())
             name = segs[1]
@@ -161,6 +162,7 @@ class Handler(BaseHTTPRequestHandler):
                         initial_message=p.get("initial_message"),
                         orchestration_type=p.get("orchestration_type"), sender_id=p.get("sender_id"),
                         wait=_truthy(p.get("wait", "false")),
+                        use_worktree=_truthy(p.get("use_worktree", "false")),
                     )
                     return self._json(201, term.public())
 

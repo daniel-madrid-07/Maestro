@@ -44,6 +44,7 @@ def launch_session(
     model: str | None = None,
     initial_message: str | None = None,
     provider: str | None = None,
+    use_worktree: bool = False,
 ) -> dict[str, Any]:
     """Start a new session: one full Claude Code process in its own tmux window.
 
@@ -53,6 +54,14 @@ def launch_session(
     profile's model (opus / sonnet). ``initial_message`` is delivered as the
     first task once the session is ready. ``provider`` is accepted for
     compatibility; only claude_code exists.
+
+    ``use_worktree`` runs the session in its own git worktree (under
+    MAESTRO_HOME) on a new branch ``mx/<terminal_id>`` made from the repo's
+    HEAD, so parallel workers on one repository never trample each other; the
+    result's ``worktree`` gives its path and branch. The worker is told to
+    commit there. Merge it yourself with plain git afterwards
+    (``git -C <repo> merge mx/<terminal_id>``). Deleting the terminal removes
+    the checkout; the branch is kept when it has unmerged commits.
     """
     try:
         term = request(
@@ -61,7 +70,7 @@ def launch_session(
                 "agent_profile": agent_profile, "session_name": session_name,
                 "working_directory": working_directory, "model": model,
                 "initial_message": initial_message, "sender_id": "maestro-ops",
-                "orchestration_type": "launch", "wait": True,
+                "orchestration_type": "launch", "wait": True, "use_worktree": use_worktree,
             },
             timeout=config.INIT_TIMEOUT + 45,
         )
@@ -73,6 +82,7 @@ def launch_session(
         "session_name": term["session_name"],
         "terminal_id": term["id"],
         "provider": "claude_code",
+        "worktree": term.get("worktree"),
     }
 
 
@@ -151,6 +161,25 @@ def get_session_info(session_name: str) -> dict[str, Any]:
         return request("GET", f"/sessions/{session_name}")
     except ApiError as exc:
         return _fail("Get session info", exc)
+
+
+@mcp.tool()
+def list_worktrees() -> dict[str, Any]:
+    """Every live terminal that runs in its own git worktree: what there is to merge.
+
+    Each entry has terminal_id, status, repo, path and branch. Merge a finished
+    one with ``git -C <repo> merge <branch>``; deleting the terminal removes the
+    checkout and keeps the branch when it still has unmerged commits.
+    """
+    try:
+        out = []
+        for s in request("GET", "/sessions"):
+            for t in request("GET", f"/sessions/{s['name']}/terminals"):
+                if t.get("worktree"):
+                    out.append({"terminal_id": t["id"], "session_name": t["session_name"], "status": t["status"], **t["worktree"]})
+        return {"success": True, "worktrees": out}
+    except ApiError as exc:
+        return _fail("List worktrees", exc)
 
 
 @mcp.tool()

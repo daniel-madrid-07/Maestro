@@ -34,6 +34,7 @@ def assign(
     message: str,
     working_directory: str | None = None,
     model: str | None = None,
+    use_worktree: bool = False,
 ) -> dict[str, Any]:
     """Start a worker in this session and give it a task, without waiting.
 
@@ -43,6 +44,14 @@ def assign(
     get_terminal_output, and call delete_terminal when you are done with it.
     ``model`` overrides the profile's model (opus / sonnet). There is no limit
     on how many workers you may run at once.
+
+    ``use_worktree`` runs the worker in its own git worktree (under
+    MAESTRO_HOME) on a new branch ``mx/<terminal_id>`` made from the repo's
+    HEAD, so parallel workers on one repository never trample each other; the
+    result's ``worktree`` gives its path and branch. The worker is told to
+    commit there. Merge it yourself with plain git afterwards
+    (``git -C <repo> merge mx/<terminal_id>``). Deleting the terminal removes
+    the checkout; the branch is kept when it has unmerged commits.
     """
     try:
         me = _me()
@@ -57,6 +66,7 @@ def assign(
                 "agent_profile": agent_profile, "working_directory": working_directory,
                 "model": model, "caller_id": me, "initial_message": worker_message,
                 "sender_id": me, "orchestration_type": "assign", "wait": False,
+                "use_worktree": use_worktree,
             },
         )
     except ApiError as exc:
@@ -64,6 +74,7 @@ def assign(
     return {
         "success": True,
         "terminal_id": term["id"],
+        "worktree": term.get("worktree"),
         "message": (
             f"Task assigned to {agent_profile} (terminal {term['id']}); it is starting and will "
             f"receive the task once ready. delete_terminal('{term['id']}') when finished."
@@ -78,11 +89,22 @@ def handoff(
     timeout: int = 900,
     working_directory: str | None = None,
     model: str | None = None,
+    use_worktree: bool = False,
 ) -> dict[str, Any]:
     """Start a worker, give it a task, wait for its answer, and close it.
 
     Blocking: returns the worker's final answer as ``output``. Use ``assign``
     when you want several workers running at the same time.
+
+    ``use_worktree`` runs the worker in its own git worktree (under
+    MAESTRO_HOME) on a new branch ``mx/<terminal_id>`` made from the repo's
+    HEAD, so parallel workers on one repository never trample each other; the
+    result's ``worktree`` gives its path and branch. The worker is told to
+    commit there. Merge it yourself with plain git afterwards
+    (``git -C <repo> merge mx/<terminal_id>``). Deleting the terminal removes
+    the checkout; the branch is kept when it has unmerged commits.
+    Here the terminal is closed for you, so the result's ``worktree`` also
+    says whether the branch was kept (``branch_kept``).
     """
     terminal_id = None
     try:
@@ -97,6 +119,7 @@ def handoff(
                                    "Complete the task, present the result, and stop; the result "
                                    "is collected automatically, do not call send_message.",
                 "sender_id": me, "orchestration_type": "handoff", "wait": True,
+                "use_worktree": use_worktree,
             },
             timeout=config.INIT_TIMEOUT + 45,
         )
@@ -110,12 +133,15 @@ def handoff(
                 break
         if status != "completed":
             return {
-                "success": False, "terminal_id": terminal_id, "output": None,
+                "success": False, "terminal_id": terminal_id, "output": None, "worktree": term.get("worktree"),
                 "message": f"Handoff did not complete (status {status}); the terminal is left running for inspection",
             }
         output = request("GET", f"/terminals/{terminal_id}/output", params={"mode": "last"})["output"]
-        request("DELETE", f"/terminals/{terminal_id}")
-        return {"success": True, "terminal_id": terminal_id, "output": output, "message": "Handoff completed"}
+        closed = request("DELETE", f"/terminals/{terminal_id}")
+        return {
+            "success": True, "terminal_id": terminal_id, "output": output,
+            "worktree": closed.get("worktree"), "message": "Handoff completed",
+        }
     except ApiError as exc:
         return {"success": False, "terminal_id": terminal_id, "output": None, "message": f"Handoff failed: {exc.detail}"}
 

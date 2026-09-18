@@ -1,7 +1,9 @@
 """maestro-ops: the MCP server an outside orchestrator (Claude in VS Code) uses.
 
-Tool names and result shapes follow CAO's ``cao-ops-mcp`` so the ``/cao``
-skill and existing habits carry over unchanged.
+Tool names and result shapes follow awslabs' ``cao-ops-mcp``, so an orchestrator
+written against that one works here unchanged. ``maestro init`` registers this
+server with Claude Code under the name ``maestro``, which is what namespaces the
+tools the orchestrator sees.
 """
 
 from typing import Any

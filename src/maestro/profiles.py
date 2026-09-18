@@ -1,4 +1,4 @@
-"""Agent profiles: a Markdown file with YAML front matter, same shape as CAO's.
+"""Agent profiles: a Markdown file with YAML front matter.
 
 Front matter keys maestro reads: ``name``, ``description``, ``role``, ``model``,
 ``claudeConfig.effort``, ``permissionMode``, ``mcpServers``, ``tags``,

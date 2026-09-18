@@ -137,7 +137,8 @@ SESSION_PREFIX = _values["session_prefix"]
 # How long a Claude Code session may take to show its input box.
 INIT_TIMEOUT = float(_values["init_timeout"])
 
-# The Ink renderer swallows an Enter sent right after a paste; CAO measured 2 s.
+# The Ink renderer swallows an Enter sent right after a paste. 2 s is what it
+# took to stop losing submissions; shorter values dropped messages silently.
 PASTE_SUBMIT_DELAY = 2.0
 
 # Status is re-read from every pane this often.

@@ -7,9 +7,10 @@ Three processes share this package:
 - ``maestro-agent``   -- the MCP server every launched session gets, so it can spawn
                          and message other sessions.
 
-The wire format is kept compatible with the parts of CAO the panel and the
-``/cao`` skill already use: the same tool names, the same ``/sessions`` and
-``/events`` routes, the same event ``kind`` vocabulary.
+Everything a session does reaches the others over one small HTTP API on
+loopback: ``/sessions`` and ``/terminals`` to run the fleet, ``/events`` to
+watch it. The panel is served by that same process, so it has no host to
+configure and nothing to authenticate against.
 """
 
 __version__ = "0.1.1"

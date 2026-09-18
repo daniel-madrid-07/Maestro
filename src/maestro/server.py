@@ -1,7 +1,7 @@
 """HTTP API of maestro-server. Loopback only, JSON in and out, SSE on /events.
 
-The routes the panel and the two MCP servers use mirror CAO's names so the
-existing panel works unchanged:
+The routes are the whole of Maestro's wire format: the panel, the two MCP
+servers and the CLI all speak this and nothing else.
 
     GET    /health
     GET    /sessions                      POST /sessions?agent_profile=&session_name=&working_directory=&model=&wait=&use_worktree=

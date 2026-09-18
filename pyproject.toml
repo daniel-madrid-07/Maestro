@@ -1,17 +1,37 @@
 [project]
-name = "maestro"
+name = "maestro-orchestrator"
 version = "0.1.0"
 description = "Runs many full Claude Code sessions in tmux and lets one of them (or VS Code) direct the others."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+keywords = ["claude", "claude-code", "agents", "orchestration", "tmux", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 dependencies = [
     # 1.x API (FastMCP); 2.x renamed it to MCPServer and changed other calls.
     "mcp>=1.23.0,<2",
     "pyyaml>=6.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/daniel-madrid-07/Maestro"
+Source = "https://github.com/daniel-madrid-07/Maestro"
+Issues = "https://github.com/daniel-madrid-07/Maestro/issues"
+
 [project.scripts]
+maestro = "maestro.cli:main"
 maestro-server = "maestro.server:main"
 maestro-ops = "maestro.ops_mcp:main"
 maestro-agent = "maestro.agent_mcp:main"
@@ -20,5 +40,11 @@ maestro-agent = "maestro.agent_mcp:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Everything under src/maestro ships, data files included (profiles/*.md,
+# skill/*.md, the whole panel/ tree): hatchling packages non-Python files that
+# live inside the package directory unless they are ignored by git.
 [tool.hatch.build.targets.wheel]
 packages = ["src/maestro"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/maestro", "tests", "README.md", "NOTICE", "LICENSE"]

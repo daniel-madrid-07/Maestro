@@ -16,6 +16,8 @@ existing panel works unchanged:
     GET    /events   (SSE)                GET /events/history?limit=
     GET    /agents/profiles               GET /agents/profiles/{name}
     GET    /worktrees                     DELETE /worktrees/{terminal_id}   (orphaned checkouts)
+    GET    /usage                         (subscription usage, percentages only)
+    GET    /  and  GET /{file}            (the panel, from the installed package)
 """
 
 import json
@@ -25,6 +27,11 @@ import queue
 import signal
 import sys
 import threading
+import time
+import urllib.parse
+import urllib.request
+from importlib import resources
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -44,14 +51,117 @@ def _truthy(value) -> bool:
     return str(value).lower() in ("1", "true", "yes", "on")
 
 
-class Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-    server_version = f"maestro/{__version__}"
+# ---------------------------------------------------------------- panel files
 
-    # ------------------------------------------------------------ plumbing
+CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json",
+    ".webmanifest": "application/manifest+json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".jpg": "image/jpeg",
+    ".webp": "image/webp",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".txt": "text/plain; charset=utf-8",
+}
+LONG_CACHE = {".woff2", ".woff", ".ttf", ".otf", ".svg", ".png", ".ico", ".jpg", ".webp"}
 
-    def log_message(self, fmt, *args):  # the access log is noise
-        pass
+
+def panel_root():
+    """The panel directory inside the installed package (works from a wheel)."""
+    return resources.files("maestro") / "panel"
+
+
+def static_file(rel: str) -> tuple[bytes, str, str] | None:
+    """``(body, content type, cache control)`` for a panel file, or None.
+
+    Only files under the panel directory are served: ``..``, absolute paths,
+    backslashes and symlinks that resolve outside it are refused.
+    """
+    rel = urllib.parse.unquote(rel).strip("/") or "index.html"
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") or "\\" in p or ":" in p or "\0" in p for p in parts):
+        return None
+    root = panel_root()
+    node = root.joinpath(*parts)
+    if isinstance(node, Path):
+        try:
+            node.resolve(strict=True).relative_to(Path(root).resolve(strict=True))
+        except (OSError, ValueError):
+            return None
+    if not node.is_file():
+        return None
+    ext = os.path.splitext(parts[-1])[1].lower()
+    if ext == ".html":
+        cache = "no-store"
+    elif ext in LONG_CACHE:
+        cache = "public, max-age=604800"
+    else:
+        cache = "no-cache"
+    return node.read_bytes(), CONTENT_TYPES.get(ext, "application/octet-stream"), cache
+
+
+# ---------------------------------------------------------------- usage
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
+USAGE_TTL = 60.0
+
+_usage_cache = {"at": 0.0, "data": None}
+_usage_lock = threading.Lock()
+
+
+def read_usage() -> dict:
+    """Claude subscription utilisation (5-hour and weekly windows), cached 60 s.
+
+    The endpoint is the one Claude Code's own ``/usage`` reads. It is NOT a
+    documented API, so every failure is reported as ``{"ok": false}`` (or the
+    last good reading flagged ``stale``) and never raised. The OAuth token stays
+    in this process: callers only ever get percentages and reset times. On macOS
+    the credentials may live in the Keychain; we do not shell out for them.
+    """
+    with _usage_lock:
+        if time.monotonic() - _usage_cache["at"] < USAGE_TTL and _usage_cache["data"]:
+            return _usage_cache["data"]
+        if not CREDENTIALS.is_file():
+            return {"ok": False, "message": "no local credentials"}
+        try:
+            token = json.loads(CREDENTIALS.read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
+            req = urllib.request.Request(
+                USAGE_URL,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "anthropic-beta": "oauth-2025-04-20",
+                    "Accept": "application/json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = json.load(resp)
+
+            def window(key):
+                block = raw.get(key) or {}
+                return {"percent": round(block.get("utilization") or 0), "resets_at": block.get("resets_at")}
+
+            data = {"ok": True, "session": window("five_hour"), "week": window("seven_day")}
+        except Exception as exc:  # noqa: BLE001 - undocumented endpoint, see docstring
+            # A transient miss (429, token refresh, network) must not blank the
+            # panel: hand back the last reading, flagged, while one exists.
+            if _usage_cache["data"]:
+                return {**_usage_cache["data"], "stale": True, "message": type(exc).__name__}
+            return {"ok": False, "message": type(exc).__name__}
+        _usage_cache.update(at=time.monotonic(), data=data)
+        return data
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
 
     def handle_error(self, request, client_address):  # noqa: D401 - stdlib hook
         """Silence the traceback the stdlib prints when a keep-alive client
@@ -60,6 +170,16 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
             return
         super().handle_error(request, client_address)
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = f"maestro/{__version__}"
+
+    # ------------------------------------------------------------ plumbing
+
+    def log_message(self, fmt, *args):  # the access log is noise
+        pass
 
     def _json(self, code: int, payload) -> None:
         body = json.dumps(payload).encode()
@@ -70,6 +190,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def _file(self, body: bytes, content_type: str, cache: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", cache)
+        self.end_headers()
+        self.wfile.write(body)
+        return True
 
     def _params(self) -> dict:
         """Query string and JSON body merged; the body wins."""
@@ -128,6 +257,10 @@ class Handler(BaseHTTPRequestHandler):
         head = segs[0] if segs else ""
         if head == "health" and method == "GET":
             return self._json(200, {"ok": True, "maestro": True, "version": __version__, "sessions": len(fleet.sessions), "terminals": len(fleet.terminals)})
+
+        # /control/usage is the path the panel used behind its old proxy.
+        if method == "GET" and (segs == ["usage"] or segs == ["control", "usage"]):
+            return self._json(200, read_usage())
 
         if head == "events" and method == "GET":
             if len(segs) == 1:
@@ -225,6 +358,10 @@ class Handler(BaseHTTPRequestHandler):
             if sub == "restart" and method == "POST":
                 wait = _truthy(self._params().get("wait", "true"))
                 return self._json(200, {**fleet.restart_terminal(tid, wait=wait).public(), "success": True})
+        if method == "GET":
+            found = static_file("/".join(segs))
+            if found:
+                return self._file(*found)
         return None
 
     def _sse(self):
@@ -258,18 +395,22 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     config.ensure_dirs()
     os.environ["PATH"] = config.pinned_path()
+    # `maestro up` points stderr at server.log itself; echoing there would
+    # write every line twice.
+    handlers = [logging.FileHandler(config.LOGS / "server.log", encoding="utf-8")]
+    if sys.stderr.isatty():
+        handlers.append(logging.StreamHandler(sys.stderr))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(sys.stderr), logging.FileHandler(config.LOGS / "server.log", encoding="utf-8")],
+        handlers=handlers,
     )
     fleet.restore()
 
     stop = threading.Event()
     threading.Thread(target=fleet.watch, args=(stop,), name="watch", daemon=True).start()
 
-    server = ThreadingHTTPServer((config.HOST, config.PORT), Handler)
-    server.daemon_threads = True
+    server = Server((config.HOST, config.PORT), Handler)
 
     def shutdown(signum, _frame):
         log.info("signal %s: shutting down", signum)

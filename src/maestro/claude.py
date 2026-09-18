@@ -231,7 +231,7 @@ def build_command(
     Any ``CLAUDE*`` variable inherited from a parent Claude session is unset first,
     otherwise the child believes it is nested and disables parts of itself.
     """
-    parts = ["claude"]
+    parts = [os.path.expanduser(config.CLAUDE)]
     if profile.permission_mode:
         parts += ["--permission-mode", profile.permission_mode]
     else:

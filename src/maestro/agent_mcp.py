@@ -198,6 +198,24 @@ def get_terminal_output(terminal_id: str, mode: str = "last") -> dict[str, Any]:
 
 
 @mcp.tool()
+def report_progress(percent: int, note: str = "") -> dict[str, Any]:
+    """Tell the orchestrator and the panel how far along your task is.
+
+    ``percent`` 0-100 for the whole task you were given; ``note`` a few words
+    on what you are doing now (optional). Call it after reading the task
+    (0-10), at each milestone, and with 100 right before your final report.
+    """
+    me = _me()
+    if not me:
+        return {"success": False, "error": "MAESTRO_TERMINAL_ID is not set"}
+    try:
+        term = request("POST", f"/terminals/{me}/progress", body={"percent": percent, "note": note})
+    except ApiError as exc:
+        return {"success": False, "error": exc.detail}
+    return {"success": True, "progress": term["progress"]}
+
+
+@mcp.tool()
 def list_terminals() -> dict[str, Any]:
     """Every terminal in your session with its status, profile and caller."""
     try:

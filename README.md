@@ -30,6 +30,13 @@ hay por fusionar, incluidos los checkouts huérfanos de un servidor anterior
 commit se commitea en la rama, se elimina el checkout, y la rama solo se borra
 si está fusionada. Nunca se pierde trabajo.
 
+**Progreso:** cada agente informa del suyo con `report_progress(percent, note)`
+(los perfiles se lo piden al empezar, en cada hito y al terminar); queda en
+`progress` del terminal y como evento `terminal_progress`. El panel lo muestra
+al pasar el ratón por un worker, y sobre el logo central la media de la flota.
+Un worker `completed` sin informe cuenta como 100; uno en marcha sin informe
+muestra "—". No se inventa nada: sin informe no hay número.
+
 **Avisos:** el servidor emite `waiting` (un worker ha hecho una pregunta),
 `stuck` (lleva `MAESTRO_STUCK_AFTER` s, por defecto 600, en `processing` sin
 que la pantalla cambie, descontando el spinner) y `error` (Claude salió). El
@@ -91,6 +98,7 @@ GET  /sessions/{n}/terminals            POST /sessions/{n}/terminals  {agent_pro
 GET  /terminals/{id}                    DELETE /terminals/{id}
 POST /terminals/{id}/input {message}    POST /terminals/{id}/inbox/messages {message, sender_id}
 POST /terminals/{id}/answer {answer}    POST /terminals/{id}/interrupt        POST /terminals/{id}/restart
+POST /terminals/{id}/progress {percent, note}
 GET  /terminals/{id}/output?mode=full|last
 GET  /events (SSE)                      GET /events/history?limit=
 GET  /agents/profiles                   GET /agents/profiles/{name}

@@ -47,6 +47,10 @@ You receive tasks from an orchestrator. There are two modes:
 
 Your own terminal id is in the `MAESTRO_TERMINAL_ID` environment variable.
 
+## Progress
+
+Keep the owner's panel true with the `report_progress` tool: after reading what you must review (`percent` 5), when you have read it all (40), when findings are written (90), and `100` right before you report.
+
 ## Review Categories
 For each code review, evaluate the following aspects:
 - **Functionality**: Does the code work as intended?

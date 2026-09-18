@@ -9,6 +9,7 @@ existing panel works unchanged:
     GET    /sessions/{name}/terminals     POST /sessions/{name}/terminals   (json body)
     GET    /terminals/{id}                DELETE /terminals/{id}
     POST   /terminals/{id}/input          POST /terminals/{id}/inbox/messages
+    POST   /terminals/{id}/progress {percent, note}
     GET    /terminals/{id}/output?mode=full|last
     POST   /terminals/{id}/answer  {answer}  POST /terminals/{id}/interrupt
     POST   /terminals/{id}/restart
@@ -214,6 +215,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(p.get("answer"), str) or not p["answer"]:
                     raise ValueError("answer is required")
                 return self._json(200, {**fleet.answer_prompt(tid, p["answer"]).public(), "success": True})
+            if sub == "progress" and method == "POST":
+                p = self._params()
+                if "percent" not in p:
+                    raise ValueError("percent is required")
+                return self._json(200, {**fleet.report_progress(tid, p["percent"], p.get("note", "")).public(), "success": True})
             if sub == "interrupt" and method == "POST":
                 return self._json(200, {**fleet.interrupt(tid).public(), "success": True})
             if sub == "restart" and method == "POST":

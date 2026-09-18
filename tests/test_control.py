@@ -137,6 +137,17 @@ class ControlTests(unittest.TestCase):
         self.assertIn("caller01", term.inbox[0]["message"])
         self.assertEqual(term.inbox[1]["message"], "queued earlier")
 
+    def test_report_progress_normalises_and_bounds(self):
+        f, term = make_fleet("processing")
+        with mock.patch.object(fleet_mod.events.log, "emit") as emit:
+            f.report_progress("abcd1234", "42.6", "  writing   tests ")
+        self.assertEqual((term.progress["percent"], term.progress["note"]), (43, "writing tests"))
+        self.assertEqual(emit.call_args.args[0], "terminal_progress")
+        self.assertEqual(term.public()["progress"]["percent"], 43)
+        for bad in (-1, 101, "many"):
+            with self.assertRaises(ValueError):
+                f.report_progress("abcd1234", bad)
+
     def test_restart_refused_while_starting(self):
         f, term = make_fleet("unknown")
         term.ready = False

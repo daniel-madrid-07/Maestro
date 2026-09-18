@@ -87,6 +87,8 @@ class Terminal:
     last_delivery: float = 0.0
     last_active: str = field(default_factory=now_iso)
     inbox: deque = field(default_factory=deque)
+    # Self-reported by the agent through report_progress: {"percent", "note", "at"}.
+    progress: dict | None = None
     restarting: bool = False  # a failed start then keeps the terminal (status error)
     waiting_since: str | None = None
     screen_hash: str | None = None  # of the last processing screen (see screen_digest)
@@ -113,6 +115,7 @@ class Terminal:
             "last_active": self.last_active,
             "stuck": self.stuck,
             "waiting_since": self.waiting_since,
+            "progress": self.progress,
         }
 
     def persisted(self) -> dict:
@@ -447,6 +450,24 @@ class Fleet:
         if mode == "last":
             return {"terminal_id": terminal_id, "mode": mode, "output": claude.last_response(screen) or ""}
         return {"terminal_id": terminal_id, "mode": "full", "output": screen}
+
+    # ------------------------------------------------------------ progress
+
+    def report_progress(self, terminal_id: str, percent, note: str = "") -> Terminal:
+        """Record what an agent says about its own task: 0-100 and a few words."""
+        term = self.get_terminal(terminal_id)
+        try:
+            value = int(round(float(percent)))
+        except (TypeError, ValueError):
+            raise ValueError("percent must be a number from 0 to 100")
+        if not 0 <= value <= 100:
+            raise ValueError("percent must be from 0 to 100")
+        note = " ".join(str(note or "").split())[:80]
+        with self._lock:
+            term.progress = {"percent": value, "note": note, "at": now_iso()}
+            term.last_active = term.progress["at"]
+        events.log.emit("terminal_progress", terminal_id, term.session, agent_name=term.agent_profile, percent=value, note=note)
+        return term
 
     # ------------------------------------------------------------ control
 

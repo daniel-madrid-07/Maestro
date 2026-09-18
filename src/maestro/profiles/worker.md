@@ -46,6 +46,10 @@ Rules of thumb:
 - Write tests where behaviour changed and run them (through the scout if the output is long).
 - When done, present what changed, where, and how it was verified, and stop.
 
+## Progress
+
+The owner watches a panel that shows how far along each worker is. Keep it true with the `report_progress` tool: right after reading the task (`percent` 5, a note like "reading the brief"), at every milestone (a file written and verified, tests passing, a review round done), and `100` right before your final report. Whole-task percentages, not the current step's.
+
 ## Talking to the orchestrator
 
 Your terminal id is in the `MAESTRO_TERMINAL_ID` environment variable. If the task message says it was **assigned** by a terminal, finish and then call `send_message` (no `receiver_id` needed: it routes to that terminal) with your report. If it says **Maestro Handoff**, just present the result and stop; it is collected automatically.

@@ -30,6 +30,9 @@ PASTE_SUBMIT_DELAY = 2.0
 # Status is re-read from every pane this often.
 TICK = 1.0
 
+# A processing pane whose screen has not changed for this long is reported stuck.
+STUCK_AFTER = float(os.environ.get("MAESTRO_STUCK_AFTER", "600"))
+
 # Linux tool directories go first so `claude` never resolves to the Windows
 # binary through WSL interop (that build cannot run inside tmux here).
 LINUX_FIRST = ":".join(

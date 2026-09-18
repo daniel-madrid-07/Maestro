@@ -180,6 +180,47 @@ def delete_terminal(terminal_id: str) -> dict[str, Any]:
         return {"success": False, "error": exc.detail}
 
 
+@mcp.tool()
+def answer_prompt(terminal_id: str, answer: str) -> dict[str, Any]:
+    """Answer the question a terminal is blocked on. Only valid while its status is waiting_user_answer.
+
+    ``answer`` is a key (Enter, Escape, Up, Down, Tab, Space), a single digit
+    (in an option dialog it selects and submits that option: ``"2"`` = the
+    second one), or text, which is typed and followed by Enter.
+    """
+    try:
+        return request("POST", f"/terminals/{terminal_id}/answer", body={"answer": answer})
+    except ApiError as exc:
+        return {"success": False, "error": exc.detail}
+
+
+@mcp.tool()
+def interrupt(terminal_id: str) -> dict[str, Any]:
+    """Stop a terminal's current turn (Escape), e.g. when a worker is going in circles.
+
+    Returns the status observed ~2 s later (normally idle or completed); queued
+    messages are then delivered as usual.
+    """
+    try:
+        return request("POST", f"/terminals/{terminal_id}/interrupt")
+    except ApiError as exc:
+        return {"success": False, "error": exc.detail}
+
+
+@mcp.tool()
+def restart_terminal(terminal_id: str) -> dict[str, Any]:
+    """Replace a terminal's Claude with a fresh one: same id, profile, model, directory and inbox.
+
+    Use when its status is ``error`` (Claude exited) or it stays unresponsive
+    after ``interrupt``. The conversation is lost. Blocks until the new Claude
+    is ready (up to ~90 s).
+    """
+    try:
+        return request("POST", f"/terminals/{terminal_id}/restart", timeout=config.INIT_TIMEOUT + 45)
+    except ApiError as exc:
+        return {"success": False, "error": exc.detail}
+
+
 def main() -> None:
     mcp.run()
 

@@ -115,6 +115,12 @@ def send_line(pane: str, line: str) -> None:
     _run("send-keys", "-t", pane, "Enter")
 
 
+def send_literal(pane: str, text: str) -> None:
+    """Type ``text`` as keystrokes, without Enter."""
+    _run("send-keys", "-t", pane, "-X", "cancel", check=False)
+    _run("send-keys", "-t", pane, "-l", text)
+
+
 def send_text(pane: str, text: str, submit_delay: float) -> None:
     """Paste ``text`` into a TUI as one bracketed paste, then submit with Enter.
 

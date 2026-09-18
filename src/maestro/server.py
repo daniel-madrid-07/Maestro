@@ -10,6 +10,8 @@ existing panel works unchanged:
     GET    /terminals/{id}                DELETE /terminals/{id}
     POST   /terminals/{id}/input          POST /terminals/{id}/inbox/messages
     GET    /terminals/{id}/output?mode=full|last
+    POST   /terminals/{id}/answer  {answer}  POST /terminals/{id}/interrupt
+    POST   /terminals/{id}/restart
     GET    /events   (SSE)                GET /events/history?limit=
     GET    /agents/profiles               GET /agents/profiles/{name}
 """
@@ -189,6 +191,16 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("message is required")
                 n = fleet.queue_message(tid, p["message"], p.get("sender_id"), p.get("orchestration_type"))
                 return self._json(200, {"success": True, "terminal_id": tid, "queued": n})
+            if sub == "answer" and method == "POST":
+                p = self._params()
+                if not isinstance(p.get("answer"), str) or not p["answer"]:
+                    raise ValueError("answer is required")
+                return self._json(200, {**fleet.answer_prompt(tid, p["answer"]).public(), "success": True})
+            if sub == "interrupt" and method == "POST":
+                return self._json(200, {**fleet.interrupt(tid).public(), "success": True})
+            if sub == "restart" and method == "POST":
+                wait = _truthy(self._params().get("wait", "true"))
+                return self._json(200, {**fleet.restart_terminal(tid, wait=wait).public(), "success": True})
         return None
 
     def _sse(self):

@@ -27,6 +27,10 @@ READY_STATES = ("idle", "completed")
 DISPATCH_GRACE = 3.0
 # Never paste into a pane that received something this recently.
 DELIVERY_GAP = 3.0
+# How long interrupt() lets the screen settle before reporting the status.
+INTERRUPT_SETTLE = 2.0
+# answer_prompt() tokens sent as a key press rather than typed.
+ANSWER_KEYS = {k.lower(): k for k in ("Enter", "Escape", "Up", "Down", "Tab", "Space")}
 
 
 def now_iso() -> str:
@@ -228,16 +232,7 @@ class Fleet:
                 raise ValueError(f"caller terminal '{caller_id}' not found")
 
             terminal_id = uuid.uuid4().hex[:8]
-            window = f"{profile.name}-{terminal_id[:4]}"
-            env = {
-                "MAESTRO_TERMINAL_ID": terminal_id,
-                "MAESTRO_URL": config.URL,
-                "PATH": config.pinned_path(),
-            }
-            if new_session or not tmux.has_session(session.tmux):
-                pane = tmux.new_session(session.tmux, window, cwd, env)
-            else:
-                pane = tmux.new_window(session.tmux, window, cwd, env)
+            pane, window = self._open_window(session, terminal_id, profile.name, cwd, new_session)
             term = Terminal(
                 id=terminal_id, name=window, session=session.name, pane=pane,
                 agent_profile=profile.name, cwd=cwd, model=model, caller_id=caller_id,
@@ -252,10 +247,29 @@ class Fleet:
             "post_create_terminal", terminal_id, session.name,
             provider="claude_code", agent_name=profile.name, caller_id=caller_id,
         )
+        self._start(term, profile, wait, initial_message, orchestration_type, sender_id)
+        return term
+
+    def _open_window(self, session: Session, terminal_id: str, profile_name: str, cwd: str, fresh: bool) -> tuple[str, str]:
+        """Open the tmux window a terminal lives in; return (pane id, window name)."""
+        window = f"{profile_name}-{terminal_id[:4]}"
+        env = {
+            "MAESTRO_TERMINAL_ID": terminal_id,
+            "MAESTRO_URL": config.URL,
+            "PATH": config.pinned_path(),
+        }
+        if fresh or not tmux.has_session(session.tmux):
+            pane = tmux.new_session(session.tmux, window, cwd, env)
+        else:
+            pane = tmux.new_window(session.tmux, window, cwd, env)
+        return pane, window
+
+    def _start(self, term: Terminal, profile, wait: bool, initial_message=None, orchestration_type=None, sender_id=None) -> None:
+        """Start Claude in the terminal's pane in the background; with ``wait``, block until ready."""
         worker = threading.Thread(
             target=self._initialize,
             args=(term, profile, initial_message, orchestration_type, sender_id),
-            name=f"init-{terminal_id}", daemon=True,
+            name=f"init-{term.id}", daemon=True,
         )
         worker.start()
         if wait:
@@ -264,7 +278,6 @@ class Fleet:
                 raise InitError(term.failed)
             if not term.ready:
                 raise InitError("initialisation is still running")
-        return term
 
     def _initialize(self, term: Terminal, profile, initial_message, orchestration_type, sender_id):
         try:
@@ -318,6 +331,16 @@ class Fleet:
         term = self.get_terminal(terminal_id)
         if not term.ready:
             raise NotReady(f"terminal '{terminal_id}' is still starting")
+        self._mark_dispatched(term)
+        tmux.send_text(term.pane, text, config.PASTE_SUBMIT_DELAY)
+        events.log.emit(
+            "post_send_message", terminal_id, term.session,
+            sender=sender_id, receiver=terminal_id,
+            orchestration_type=orchestration_type or "send_message",
+        )
+
+    def _mark_dispatched(self, term: Terminal) -> None:
+        """Remember the answer on screen now, so the loop can tell the next one apart."""
         screen = tmux.capture(term.pane, 200)
         with self._lock:
             term.snapshot_response = claude.last_response(screen)
@@ -327,12 +350,6 @@ class Fleet:
             term.last_delivery = term.dispatch_at
             term.status = "processing"
             term.last_active = now_iso()
-        tmux.send_text(term.pane, text, config.PASTE_SUBMIT_DELAY)
-        events.log.emit(
-            "post_send_message", terminal_id, term.session,
-            sender=sender_id, receiver=terminal_id,
-            orchestration_type=orchestration_type or "send_message",
-        )
 
     def queue_message(self, terminal_id: str, text: str, sender_id=None, orchestration_type=None) -> int:
         """Queue ``text``; the watch loop pastes it when the terminal is free."""
@@ -347,6 +364,76 @@ class Fleet:
         if mode == "last":
             return {"terminal_id": terminal_id, "mode": mode, "output": claude.last_response(screen) or ""}
         return {"terminal_id": terminal_id, "mode": "full", "output": screen}
+
+    # ------------------------------------------------------------ control
+
+    def answer_prompt(self, terminal_id: str, answer: str) -> Terminal:
+        """Answer the question a terminal is blocked on (status waiting_user_answer).
+
+        ``answer`` is one of ANSWER_KEYS (case-insensitive), sent as that key;
+        a single digit, sent alone; or anything else, typed literally and
+        followed by Enter. Observed on Claude Code 2.1.276: in an option dialog
+        (AskUserQuestion) the digit key both selects and submits that option,
+        so ``"2"`` answers with the second one and an extra Enter would land in
+        whatever is shown next.
+        """
+        term = self.get_terminal(terminal_id)
+        if not term.ready:
+            raise NotReady(f"terminal '{terminal_id}' is still starting")
+        if term.status != "waiting_user_answer":
+            raise ValueError(f"terminal '{terminal_id}' is not waiting for an answer (status {term.status})")
+        if not answer:
+            raise ValueError("answer is required")
+        self._mark_dispatched(term)
+        key = ANSWER_KEYS.get(answer.strip().lower())
+        if key:
+            tmux.send_key(term.pane, key)
+        elif len(answer) == 1 and answer.isdigit():
+            tmux.send_literal(term.pane, answer)
+        else:
+            tmux.send_literal(term.pane, answer)
+            time.sleep(0.3)
+            tmux.send_key(term.pane, "Enter")
+        return term
+
+    def interrupt(self, terminal_id: str) -> Terminal:
+        """Stop the current turn with Escape; return once the screen had ~2 s to settle."""
+        term = self.get_terminal(terminal_id)
+        if not term.ready:
+            raise NotReady(f"terminal '{terminal_id}' is still starting")
+        tmux.send_key(term.pane, "Escape")
+        time.sleep(0.3)
+        tmux.send_key(term.pane, "Escape")  # the first can be swallowed mid-render
+        with self._lock:
+            term.dispatched = False  # the interrupted turn will never produce an answer
+            term.dispatch_at = 0.0
+            term.last_active = now_iso()
+        time.sleep(INTERRUPT_SETTLE)
+        return term
+
+    def restart_terminal(self, terminal_id: str, wait: bool = True) -> Terminal:
+        """Replace a terminal's window with a fresh Claude; same id, profile, model, cwd, caller, inbox."""
+        term = self.get_terminal(terminal_id)
+        profile = profiles.load(term.agent_profile)
+        with self._lock:
+            session = self.sessions[term.session]
+            term.ready = False  # keeps the watch loop off the dying pane
+            old_pane = term.pane
+        tmux.kill_window(old_pane)
+        with self._lock:
+            term.pane, term.name = self._open_window(session, term.id, profile.name, term.cwd, False)
+            term.failed = None
+            term.status = "unknown"
+            term.dispatched = False
+            term.dispatch_at = 0.0
+            term.snapshot_response = None
+            term.snapshot_count = 0
+            term.last_delivery = 0.0
+            term.last_active = now_iso()
+        self.save()
+        events.log.emit("terminal_restarted", term.id, term.session, agent_name=term.agent_profile, old_pane=old_pane, pane=term.pane)
+        self._start(term, profile, wait)
+        return term
 
     # ------------------------------------------------------------ teardown
 
@@ -403,6 +490,8 @@ class Fleet:
 
     def _observe(self, term: Terminal) -> None:
         if not tmux.pane_alive(term.pane):
+            if not term.ready:  # restart_terminal is swapping the pane
+                return
             log.warning("terminal %s: pane vanished", term.id)
             try:
                 self.delete_terminal(term.id)

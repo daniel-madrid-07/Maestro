@@ -1,0 +1,63 @@
+name: release
+
+# Builds MaestroSetup.exe and attaches it to the release that triggered it.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A CRLF in install.sh breaks every line of it inside Linux; .gitattributes
+      # pins LF, and this makes sure it held.
+      - name: install.sh has Unix line endings
+        shell: pwsh
+        run: |
+          if ([IO.File]::ReadAllText("install.sh").Contains("`r")) { throw "install.sh has CRLF line endings" }
+
+      - name: install.ps1 parses
+        shell: powershell
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD\installer\install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
+
+      - name: Tests (native Windows backend)
+        shell: pwsh
+        run: |
+          pip install uv
+          uv run --python 3.13 python -m unittest discover -s tests -v
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+
+      - name: Build MaestroSetup.exe
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_NAME -match '^v(.+)$') { $Matches[1] } else { "0.0.0-dev" }
+          & $env:ISCC "/DAppVersion=$version" installer\maestro.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-Item installer\Output\MaestroSetup.exe | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MaestroSetup
+          path: installer/Output/MaestroSetup.exe
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload $env:GITHUB_REF_NAME installer\Output\MaestroSetup.exe --clobber

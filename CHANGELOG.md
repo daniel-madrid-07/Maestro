@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.2 — 2026-09-18
+
+### Added
+
+- **Native Windows.** No WSL, no tmux: each session runs in a ConPTY (the
+  pseudo-console Windows Terminal is built on) and its screen is rendered by a
+  terminal emulator (pyte), so status detection and answer extraction work
+  unchanged. `config.backend` picks `tmux` or `conpty` (`auto` by default).
+  On Windows the sessions are the server's children: they end with it instead
+  of surviving a restart.
+- **One-click Windows installer** (`MaestroSetup.exe`, attached to every
+  release, about 2 MB). Installs Git for Windows (checksum-verified), uv,
+  Claude Code and Maestro per user, signs the user in to Claude in the
+  browser, registers the MCP server and the skill, and opens the panel in a
+  window of its own. No administrator rights, no restart. Uninstalls from
+  Settings → Apps.
+- First-run notices from new Claude Code builds (for example "Claude in Chrome
+  extension detected") no longer stall a session's start: an unknown option
+  dialog before the first prompt is answered with its default, which these
+  dialogs make the conservative choice.
+- `maestro up` and `maestro open` open the panel in a window of its own on
+  Windows (Chrome or Edge `--app`).
+- **One-line installer for macOS and Linux** (`install.sh`): tmux through the
+  system package manager or Homebrew, uv, Claude Code, Maestro, sign-in, start.
+  Safe to run again.
+
+### Fixed
+
+- `maestro doctor` reported "claude login: ok" whenever `~/.claude.json`
+  existed, which `maestro init` itself creates. It now asks Claude Code
+  (`claude auth status`), so a fresh install that is not signed in fails the
+  check instead of passing it.
+
 ## 0.1.1 — 2026-09-18
 
 Found by a fleet of nine agents auditing the repository through Maestro itself.

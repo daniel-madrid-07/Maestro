@@ -18,7 +18,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from maestro import claude, config, events, profiles, tmux
+from maestro import claude, config, events, profiles
+from maestro.term import backend as console
 from maestro import worktree as worktrees
 
 log = logging.getLogger("maestro.fleet")
@@ -169,7 +170,7 @@ class Fleet:
             data = json.loads(config.STATE_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
-        live = set(tmux.list_sessions())
+        live = set(console.list_sessions())
         self.orphans = [o for o in data.get("orphans", []) if os.path.isdir(o.get("path", ""))]
         for s in data.get("sessions", []):
             session = Session(**s)
@@ -178,7 +179,7 @@ class Fleet:
         for t in data.get("terminals", []):
             wt = t.pop("worktree", None)
             term = Terminal(**t, worktree=worktrees.Worktree(**wt) if wt else None)
-            if term.session in self.sessions and tmux.pane_alive(term.pane):
+            if term.session in self.sessions and console.pane_alive(term.pane):
                 term.ready = True
                 term.dispatched = True  # its history is unknown; trust the screen
                 self.terminals[term.id] = term
@@ -325,10 +326,10 @@ class Fleet:
             "MAESTRO_URL": config.URL,
             "PATH": config.pinned_path(),
         }
-        if fresh or not tmux.has_session(session.tmux):
-            pane = tmux.new_session(session.tmux, window, cwd, env)
+        if fresh or not console.has_session(session.tmux):
+            pane = console.new_session(session.tmux, window, cwd, env)
         else:
-            pane = tmux.new_window(session.tmux, window, cwd, env)
+            pane = console.new_window(session.tmux, window, cwd, env)
         return pane, window
 
     def _start(self, term: Terminal, profile, wait: bool, initial_message=None, orchestration_type=None, sender_id=None) -> None:
@@ -348,19 +349,16 @@ class Fleet:
 
     def _initialize(self, term: Terminal, profile, initial_message, orchestration_type, sender_id):
         try:
-            deadline = time.time() + 15
-            while time.time() < deadline and tmux.pane_command(term.pane) not in tmux.SHELLS:
-                time.sleep(0.3)
             claude.ensure_no_bypass_dialog()
             claude.ensure_trusted(term.cwd)
             prompt_file, mcp_file = claude.write_launch_files(term.id, profile)
-            tmux.send_line(term.pane, claude.build_command(term.id, profile, term.model, prompt_file, mcp_file))
+            console.launch(term.pane, claude.launch_argv(profile, term.model, prompt_file, mcp_file))
             started = time.time()
             answered: set[str] = set()
             previous = None
             while time.time() - started < config.INIT_TIMEOUT:
                 time.sleep(0.5)
-                screen = tmux.capture(term.pane, 40)
+                screen = console.capture(term.pane, 40)
                 if claude.answer_startup_dialogs(term.pane, screen, answered):
                     previous = None
                     continue
@@ -411,7 +409,7 @@ class Fleet:
             # to the dead one and fails, never into the new pane's bare shell.
             pane = term.pane
         self._mark_dispatched(term, pane)
-        tmux.send_text(pane, text, config.PASTE_SUBMIT_DELAY)
+        console.send_text(pane, text, config.PASTE_SUBMIT_DELAY)
         with self._lock:
             # The paste itself took ~2 s; the grace period counts from the Enter.
             term.dispatch_at = term.last_delivery = time.time()
@@ -426,7 +424,7 @@ class Fleet:
 
         Same capture depth as ``_observe``: the counts are compared against it.
         """
-        screen = tmux.capture(pane or term.pane, 60)
+        screen = console.capture(pane or term.pane, 60)
         with self._lock:
             term.snapshot_response = claude.last_response(screen)
             term.snapshot_count = claude.response_count(screen)
@@ -446,7 +444,7 @@ class Fleet:
 
     def output(self, terminal_id: str, mode: str = "full") -> dict:
         term = self.get_terminal(terminal_id)
-        screen = tmux.capture(term.pane, 2000)
+        screen = console.capture(term.pane, 2000)
         if mode == "last":
             return {"terminal_id": terminal_id, "mode": mode, "output": claude.last_response(screen) or ""}
         return {"terminal_id": terminal_id, "mode": "full", "output": screen}
@@ -495,17 +493,17 @@ class Fleet:
             # Cancelling the question ends the turn without an answer; marking a
             # dispatch would leave the loop waiting for one forever.
             self._clear_dispatch(term)
-            tmux.send_key(term.pane, key)
+            console.send_key(term.pane, key)
             return term
         self._mark_dispatched(term)
         if key:
-            tmux.send_key(term.pane, key)
+            console.send_key(term.pane, key)
         elif len(answer) == 1 and answer.isdigit():
-            tmux.send_literal(term.pane, answer)
+            console.send_literal(term.pane, answer)
         else:
-            tmux.send_literal(term.pane, answer)
+            console.send_literal(term.pane, answer)
             time.sleep(0.3)
-            tmux.send_key(term.pane, "Enter")
+            console.send_key(term.pane, "Enter")
         return term
 
     def _clear_dispatch(self, term: Terminal) -> None:
@@ -527,10 +525,10 @@ class Fleet:
         if term.status not in ("processing", "waiting_user_answer"):
             raise ValueError(f"terminal '{terminal_id}' has nothing to interrupt (status {term.status})")
         self._clear_dispatch(term)
-        tmux.send_key(term.pane, "Escape")
+        console.send_key(term.pane, "Escape")
         time.sleep(1.5)
-        if claude.detect_status(tmux.capture(term.pane, 40)) == "processing":
-            tmux.send_key(term.pane, "Escape")  # the first was swallowed mid-render
+        if claude.detect_status(console.capture(term.pane, 40)) == "processing":
+            console.send_key(term.pane, "Escape")  # the first was swallowed mid-render
             time.sleep(INTERRUPT_SETTLE)
         return term
 
@@ -547,7 +545,7 @@ class Fleet:
             term.ready = False  # keeps the watch loop off the dying pane
             term.restarting = True
             old_pane = term.pane
-        tmux.kill_window(old_pane)
+        console.kill_window(old_pane)
         with self._lock:
             try:
                 term.pane, term.name = self._open_window(session, term.id, profile.name, term.cwd, False)
@@ -588,7 +586,7 @@ class Fleet:
             if term is None:
                 raise KeyError(f"terminal '{terminal_id}' not found")
             remaining = [t for t in self.terminals.values() if t.session == term.session]
-        tmux.kill_window(term.pane)
+        console.kill_window(term.pane)
         claude.remove_launch_files(terminal_id)
         events.log.emit("post_kill_terminal", terminal_id, term.session, agent_name=term.agent_profile)
         if not remaining:
@@ -629,7 +627,7 @@ class Fleet:
             session = self.sessions.pop(name, None)
         if session is None:
             return
-        tmux.kill_session(session.tmux)
+        console.kill_session(session.tmux)
         events.log.emit("post_kill_session", None, name, session_name=name)
 
     def delete_session(self, name: str) -> dict:
@@ -656,13 +654,13 @@ class Fleet:
                 continue
             try:
                 self._observe(term)
-            except tmux.TmuxError as exc:
+            except console.Error as exc:
                 log.debug("observe %s: %s", term.id, exc)
             except Exception:
                 log.exception("observe %s", term.id)
 
     def _observe(self, term: Terminal) -> None:
-        if not tmux.pane_alive(term.pane):
+        if not console.pane_alive(term.pane):
             if not term.ready:  # restart_terminal is swapping the pane
                 return
             log.warning("terminal %s: pane vanished", term.id)
@@ -671,10 +669,10 @@ class Fleet:
             except KeyError:
                 pass
             return
-        screen = tmux.capture(term.pane, 60)
+        screen = console.capture(term.pane, 60)
         if claude.REWIND in "\n".join(claude.rows_of(screen)[-20:]):
             log.info("terminal %s: dismissing the Rewind menu", term.id)
-            tmux.send_key(term.pane, "Escape")
+            console.send_key(term.pane, "Escape")
             return
         raw = claude.detect_status(screen)
         now = time.time()
@@ -714,7 +712,7 @@ class Fleet:
         if msg:
             try:
                 self.send_input(term.id, msg["message"], msg["sender_id"], msg["orchestration_type"])
-            except (NotReady, tmux.TmuxError) as exc:
+            except (NotReady, console.Error) as exc:
                 with self._lock:
                     term.inbox.appendleft(msg)  # the pane went away under us; next tick retries
                 log.warning("terminal %s: delivery deferred: %s", term.id, exc)

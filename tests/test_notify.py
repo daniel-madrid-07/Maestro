@@ -31,8 +31,8 @@ class Harness(unittest.TestCase):
         self.screen = BASE
         patches = [
             mock.patch.object(events, "log", self.log),
-            mock.patch("maestro.tmux.capture", side_effect=lambda pane, lines=0: self.screen),
-            mock.patch("maestro.tmux.pane_alive", return_value=True),
+            mock.patch("maestro.term.backend.capture", side_effect=lambda pane, lines=0: self.screen),
+            mock.patch("maestro.term.backend.pane_alive", return_value=True),
             mock.patch("maestro.claude.shell_is_back", return_value=False),
             mock.patch("time.time", side_effect=lambda: self.now),
             mock.patch.object(config, "STUCK_AFTER", 600.0),

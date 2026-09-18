@@ -37,6 +37,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from maestro import __version__, config, events, profiles
 from maestro.fleet import InitError, NotReady, fleet
+from maestro.term import backend as console
 
 log = logging.getLogger("maestro.server")
 
@@ -47,6 +48,10 @@ log = logging.getLogger("maestro.server")
 # open in their browser drive the fleet -- the classic localhost drive-by.
 # `_same_origin_only` below closes the other half of that hole.
 ALLOWED_CONTENT_TYPES = ("application/json", "")
+
+
+# Set by main(): stops the server from a request (POST /shutdown).
+_request_shutdown = None
 
 
 def _truthy(value) -> bool:
@@ -169,7 +174,7 @@ class Server(ThreadingHTTPServer):
         """Silence the traceback the stdlib prints when a keep-alive client
         drops the socket between requests; anything else stays loud."""
         exc = sys.exc_info()[1]
-        if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
+        if isinstance(exc, ConnectionError):  # reset, aborted (Windows), broken pipe
             return
         super().handle_error(request, client_address)
 
@@ -270,7 +275,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"detail": str(exc)})
         except InitError as exc:
             self._json(500, {"detail": f"launch failed: {exc}"})
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:
             pass
         except Exception as exc:
             log.exception("%s %s", method, path)
@@ -285,6 +290,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if segs == ["usage"] and method == "GET":
             return self._json(200, read_usage())
+
+        # How `maestro down` stops a server on Windows, which has no SIGTERM a
+        # detached process can receive. Same guard as every other route.
+        if segs == ["shutdown"] and method == "POST" and _request_shutdown is not None:
+            self._json(200, {"ok": True})
+            _request_shutdown("POST /shutdown")
+            return True
 
         if head == "events" and method == "GET":
             if len(segs) == 1:
@@ -434,18 +446,25 @@ def main() -> None:
 
     server = Server((config.HOST, config.PORT), Handler)
 
-    def shutdown(signum, _frame):
-        log.info("signal %s: shutting down", signum)
+    def request_shutdown(why) -> None:
+        log.info("%s: shutting down", why)
         stop.set()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
-    signal.signal(signal.SIGTERM, shutdown)
-    signal.signal(signal.SIGINT, shutdown)
-    log.info("maestro-server %s listening on http://%s:%d", __version__, config.HOST, config.PORT)
+    global _request_shutdown
+    _request_shutdown = request_shutdown
+    for name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), lambda signum, _frame: request_shutdown(f"signal {signum}"))
+    log.info("maestro-server %s listening on http://%s:%d (%s)", __version__, config.HOST, config.PORT, console.__name__)
     try:
         server.serve_forever()
     finally:
         server.server_close()
+        if not console.PERSISTENT:
+            # The sessions are this process's children; end them rather than
+            # leave Claude processes running with no one reading them.
+            console.kill_all()
 
 
 if __name__ == "__main__":

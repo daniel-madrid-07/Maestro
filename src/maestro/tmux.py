@@ -17,6 +17,20 @@ class TmuxError(RuntimeError):
     pass
 
 
+# The name every terminal backend uses for its failures (see maestro.term).
+Error = TmuxError
+
+# Sessions survive a server restart: tmux keeps them, `restore()` re-adopts them.
+PERSISTENT = True
+
+# A Claude Code launched from inside another one inherits CLAUDE* variables and
+# believes it is nested, which disables parts of it. The shell drops them first.
+UNSET_CLAUDE_ENV = (
+    "unset $(env | sed -n 's/^\\(CLAUDE[A-Z_]*\\)=.*/\\1/p' "
+    "| grep -v CLAUDE_CONFIG_DIR) 2>/dev/null; "
+)
+
+
 def _run(*args: str, input: bytes | None = None, check: bool = True) -> str:
     proc = subprocess.run(
         ["tmux", *args], input=input, capture_output=True, timeout=20
@@ -142,3 +156,24 @@ def send_text(pane: str, text: str, submit_delay: float) -> None:
 
 def quote(parts: list[str]) -> str:
     return shlex.join(parts)
+
+
+def launch(pane: str, argv: list[str], shell_wait: float = 15.0) -> None:
+    """Start ``argv`` in the pane: wait for its shell, then type the command.
+
+    Typed into a shell rather than run as the window's command on purpose: when
+    Claude exits, the shell is left behind, which is how ``agent_exited`` tells
+    an exit from a hang.
+    """
+    deadline = time.time() + shell_wait
+    while time.time() < deadline and pane_command(pane) not in SHELLS:
+        time.sleep(0.3)
+    send_line(pane, UNSET_CLAUDE_ENV + quote(argv))
+
+
+def agent_exited(pane: str) -> bool:
+    """True when the pane's foreground process is a shell again (Claude exited)."""
+    try:
+        return pane_command(pane) in SHELLS
+    except TmuxError:
+        return False

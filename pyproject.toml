@@ -1,17 +1,18 @@
 [project]
 name = "maestro-orchestrator"
-version = "0.1.1"
-description = "Runs many full Claude Code sessions in tmux and lets one of them (or VS Code) direct the others."
+version = "0.1.2"
+description = "Runs many full Claude Code sessions (tmux on Linux/macOS, ConPTY on Windows) and lets one of them (or VS Code) direct the others."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-keywords = ["claude", "claude-code", "agents", "orchestration", "tmux", "mcp"]
+keywords = ["claude", "claude-code", "agents", "orchestration", "tmux", "conpty", "mcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
@@ -23,6 +24,10 @@ dependencies = [
     # 1.x API (FastMCP); 2.x renamed it to MCPServer and changed other calls.
     "mcp>=1.23.0,<2",
     "pyyaml>=6.0",
+    # Windows has no tmux: each session runs in a ConPTY (pywinpty) and its
+    # screen is rendered by a terminal emulator (pyte).
+    "pywinpty>=2.0; sys_platform == 'win32'",
+    "pyte>=0.8.2; sys_platform == 'win32'",
 ]
 
 [project.urls]

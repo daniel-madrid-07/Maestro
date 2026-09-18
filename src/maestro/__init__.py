@@ -13,4 +13,4 @@ watch it. The panel is served by that same process, so it has no host to
 configure and nothing to authenticate against.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

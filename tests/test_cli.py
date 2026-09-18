@@ -142,7 +142,10 @@ class DoctorTest(Sandbox):
         self.assertNotIn("fail", out)
 
     def test_missing_tmux_fails(self):
-        code, out = self.doctor(mock.patch.object(cli.shutil, "which", return_value=None))
+        code, out = self.doctor(
+            mock.patch.object(config, "BACKEND", "tmux"),
+            mock.patch.object(cli.shutil, "which", return_value=None),
+        )
         self.assertEqual(code, 1)
         self.assertIn("tmux", out)
 
@@ -151,6 +154,7 @@ class DoctorTest(Sandbox):
         self.assertEqual(code, 1)
         self.assertIn("taken", out)
 
+    @unittest.skipIf(sys.platform == "win32", "a WSL path check")
     def test_windows_build_under_wsl_warns(self):
         code, out = self.doctor(
             mock.patch.object(cli, "is_wsl", return_value=True),
@@ -158,10 +162,23 @@ class DoctorTest(Sandbox):
         )
         self.assertIn("Windows build", out)
 
-    def test_native_windows_fails_with_wsl_hint(self):
-        code, out = self.doctor(mock.patch.object(sys, "platform", "win32"))
+    def test_conpty_backend_needs_no_tmux(self):
+        fake = mock.Mock()
+        code, out = self.doctor(
+            mock.patch.object(config, "BACKEND", "conpty"),
+            mock.patch.dict(sys.modules, {"winpty": fake, "pyte": fake}),
+        )
+        self.assertNotIn("tmux", out)
+        self.assertIn("ConPTY", out)
+        self.assertNotIn("fail", out)
+
+    def test_conpty_backend_without_pywinpty_fails(self):
+        code, out = self.doctor(
+            mock.patch.object(config, "BACKEND", "conpty"),
+            mock.patch.dict(sys.modules, {"winpty": None, "pyte": mock.Mock()}),
+        )
         self.assertEqual(code, 1)
-        self.assertIn("run it inside WSL", out)
+        self.assertIn("winpty is missing", out)
 
     def test_never_logged_in_fails(self):
         patches = self.healthy()
@@ -187,7 +204,10 @@ class StaticRouteTest(unittest.TestCase):
         (self.panel / "index.html").write_text("<h1>panel</h1>")
         (self.panel / "fonts" / "a.woff2").write_bytes(b"font")
         (base / "secret.txt").write_text("no")
-        (self.panel / "escape.txt").symlink_to(base / "secret.txt")
+        try:
+            (self.panel / "escape.txt").symlink_to(base / "secret.txt")
+        except OSError:  # Windows without Developer Mode may not create symlinks
+            pass
         p = mock.patch.object(server, "panel_root", return_value=self.panel)
         p.start()
         self.addCleanup(p.stop)
@@ -208,6 +228,8 @@ class StaticRouteTest(unittest.TestCase):
             self.assertIsNone(server.static_file(rel), rel)
 
     def test_refuses_escaping_symlink(self):
+        if not (self.panel / "escape.txt").is_symlink():
+            self.skipTest("this system cannot create symlinks")
         self.assertIsNone(server.static_file("escape.txt"))
 
     def test_missing_file(self):

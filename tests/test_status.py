@@ -5,8 +5,10 @@ Claude Code 2.1.276 sessions launched by maestro. Synthetic variants are built
 from them for states that are awkward to catch live (spinner, question).
 """
 
+import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from maestro import claude, profiles
 
@@ -85,6 +87,7 @@ class LastResponse(unittest.TestCase):
 
 
 class Launch(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "the tmux launch line is POSIX shell")
     def test_command_carries_model_effort_and_files(self):
         p = profiles.load("worker")
         cmd = claude.build_command("abcd1234", p, "sonnet", Path("/tmp/x.prompt"), Path("/tmp/x.mcp.json"))
@@ -101,6 +104,44 @@ class Launch(unittest.TestCase):
         self.assertIn("--model opus", cmd)
         self.assertIn("--effort xhigh", cmd)
         self.assertNotIn("--mcp-config", cmd)
+
+    def test_argv_is_the_command_without_the_shell(self):
+        p = profiles.load("worker")
+        argv = claude.launch_argv(p, "sonnet", Path("/tmp/x.prompt"), None)
+        self.assertEqual(argv[1:3], ["--dangerously-skip-permissions", "--model"])
+        self.assertNotIn("unset", " ".join(argv))
+
+
+class StartupDialogs(unittest.TestCase):
+    CHROME = (
+        "Claude in Chrome extension detected\n\n"
+        " > 1. Keep browser tools off\n"
+        "   2. Turn on browser tools\n\n"
+        "Enter to confirm · Esc to cancel\n"
+    )
+
+    def answer(self, screen, answered):
+        with mock.patch("maestro.term.backend.send_key") as key, \
+             mock.patch("maestro.term.backend.capture", return_value=screen), \
+             mock.patch("time.sleep"):
+            sent = claude.answer_startup_dialogs("%1", screen, answered)
+        return sent, [c.args[1] for c in key.call_args_list]
+
+    def test_unknown_dialog_takes_its_default_once(self):
+        answered: set[str] = set()
+        self.assertEqual(self.answer(self.CHROME, answered), (True, ["Enter"]))
+        self.assertEqual(self.answer(self.CHROME, answered), (False, []))
+
+    def test_ready_prompt_is_not_a_dialog(self):
+        self.assertEqual(self.answer(fixture("worker_after_launch"), set()), (False, []))
+
+
+class ProjectKeys(unittest.TestCase):
+    def test_windows_spellings(self):
+        with mock.patch.object(claude.sys, "platform", "win32"), \
+             mock.patch.object(claude.os.path, "realpath", side_effect=lambda p: p):
+            keys = claude._project_keys(r"C:\Users\x\repo")
+        self.assertTrue({r"C:\Users\x\repo", "C:/Users/x/repo", "c:/Users/x/repo"} <= keys)
 
 
 class Profiles(unittest.TestCase):

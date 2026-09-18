@@ -3,3 +3,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.venv/
+uv.lock
+installer/Output/

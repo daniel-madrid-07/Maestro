@@ -1,13 +1,13 @@
 ---
 name: maestro
-description: Orchestrate a task across many full Claude Code sessions with Maestro (each one a real Claude Code in its own tmux window, visible live in the Maestro panel). Use whenever the user asks to build, fix, refactor or research something "with Maestro", "with sessions", "with workers", "in parallel", "orchestrating", or types /maestro. Works from any project folder.
+description: Orchestrate a task across many full Claude Code sessions with Maestro (each one a real Claude Code in a terminal of its own, visible live in the Maestro panel). Use whenever the user asks to build, fix, refactor or research something "with Maestro", "with sessions", "with workers", "in parallel", "orchestrating", or types /maestro. Works from any project folder.
 ---
 
 # Orchestrate with Maestro
 
 You are the orchestrator. Do not do the work in this session: inspect, split,
 launch workers, verify, report. The workers are full Claude Code sessions
-running in tmux, driven through the `mcp__maestro__*` tools (registered at user
+(in tmux on Linux and macOS, in Windows' own pseudo-consoles on Windows), driven through the `mcp__maestro__*` tools (registered at user
 scope by `maestro init`, so they exist in every project). The user can watch
 every session in the panel (`maestro open`, by default http://127.0.0.1:9889/).
 
@@ -32,9 +32,9 @@ them one unit, sequence them, or give each its own worktree (below).
   delegates to its own workers with `assign` / `handoff`). `list_profiles`
   shows what is installed; the user's copies live in `~/.maestro/profiles/`
   and win over the packaged ones.
-- `working_directory`: an absolute path the server can see. The server runs
-  where tmux runs, so on Windows (WSL) a Windows folder is spelled the Linux
-  way: `C:\Code\Foo` becomes `/mnt/c/Code/Foo`. New folders are trusted
+- `working_directory`: an absolute path as the server sees it. A server
+  running natively on Windows takes `C:\Code\Foo` as is; one running inside
+  WSL needs the Linux spelling, `/mnt/c/Code/Foo`. New folders are trusted
   automatically.
 - `session_name`: short and meaningful (`auth-api`, `review-1`).
 - `model`: optional; the profile's model otherwise (see the note below).
@@ -101,8 +101,8 @@ clear success check. Follow the user's own policy when they have one.
 - The panel raises a notification when a session is waiting for an answer, is
   stuck, or failed; the user may act before you do.
 - `maestro status` in a shell lists every session with its status, progress and
-  branch; `maestro down` stops the server but leaves the sessions running, and
-  `maestro up` picks them up again.
+  branch. `maestro down` stops the server; with tmux the sessions keep running
+  and `maestro up` picks them up again, on Windows they end with the server.
 - On WSL, work under `/mnt/c` is slower than on the Linux filesystem; that is
   the price of seeing the edits live in a Windows editor. If git shows every
   file as modified there, run `git config core.filemode false` in that repo.

@@ -29,7 +29,7 @@ class LoadTest(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(values["port"], 9999)
         self.assertEqual(values["claude"], "/opt/claude")
-        self.assertEqual(values["extra_path"], ["/opt/bin"])
+        self.assertEqual(values["extra_path"], [str(Path("/opt/bin"))])
         self.assertEqual(values["host"], "127.0.0.1")
 
     def test_env_beats_file(self):
@@ -41,7 +41,7 @@ class LoadTest(unittest.TestCase):
 
     def test_env_extra_path_splits_on_pathsep(self):
         values, _ = config.load(self.env(MAESTRO_EXTRA_PATH=os.pathsep.join(["/a", "/b"])))
-        self.assertEqual(values["extra_path"], ["/a", "/b"])
+        self.assertEqual(values["extra_path"], [str(Path("/a")), str(Path("/b"))])
 
     def test_broken_file_falls_back_and_reports(self):
         (self.home / "config.toml").write_text("port = [\n")
@@ -69,7 +69,7 @@ class PinnedPathTest(unittest.TestCase):
 
     def test_extra_path_goes_first(self):
         with mock.patch.object(config, "EXTRA_PATH", ["/x/bin", "/y/bin"]), mock.patch.dict(os.environ, {"PATH": "/usr/bin"}):
-            self.assertEqual(config.pinned_path(), "/x/bin:/y/bin:/usr/bin")
+            self.assertEqual(config.pinned_path(), os.pathsep.join(["/x/bin", "/y/bin", "/usr/bin"]))
 
     def test_nothing_hardcoded(self):
         with mock.patch.object(config, "EXTRA_PATH", []), mock.patch.dict(os.environ, {"PATH": "/only"}):

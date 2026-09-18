@@ -1,0 +1,13 @@
+# Shell scripts run inside Linux: a CRLF from a Windows checkout (GitHub's
+# Windows runners check out with autocrlf) breaks every line of them.
+*.sh    text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.ps1   text eol=crlf
+*.iss   text eol=crlf
+*.bat   text eol=crlf
+*.ico   binary
+*.png   binary
+*.gif   binary
+*.ttf   binary
+*.woff2 binary

@@ -19,6 +19,7 @@ DEFAULTS = {
     "tick": 1.0,
     "session_prefix": "mx-",
     "extra_path": [],
+    "backend": "auto",
 }
 
 # key -> (environment variable, type). extra_path takes os.pathsep-separated dirs.
@@ -31,6 +32,7 @@ ENV = {
     "tick": ("MAESTRO_TICK", float),
     "session_prefix": ("MAESTRO_SESSION_PREFIX", str),
     "extra_path": ("MAESTRO_EXTRA_PATH", list),
+    "backend": ("MAESTRO_BACKEND", str),
 }
 
 CONFIG_TEMPLATE = """\
@@ -59,6 +61,10 @@ session_prefix = "mx-"
 # Directories put in front of PATH for the panes maestro launches, e.g.
 # ["~/.npm-global/bin"] when `claude` would otherwise resolve to the wrong build.
 extra_path = []
+
+# What hosts each session: "tmux" (Linux, macOS, WSL), "conpty" (Windows'
+# own pseudo-console), or "auto" to pick by platform.
+backend = "auto"
 """
 
 
@@ -149,6 +155,15 @@ STUCK_AFTER = float(_values["stuck_after"])
 
 EXTRA_PATH = list(_values["extra_path"])
 
+# tmux keeps sessions alive across a server restart and exists wherever a POSIX
+# system is; Windows has no tmux, so there each session gets a ConPTY of its own.
+BACKEND = _values["backend"]
+if BACKEND not in ("auto", "tmux", "conpty"):
+    LOAD_ERROR = LOAD_ERROR or f"backend must be auto, tmux or conpty, not {BACKEND!r}"
+    BACKEND = "auto"
+if BACKEND == "auto":
+    BACKEND = "conpty" if sys.platform == "win32" else "tmux"
+
 
 def pinned_path() -> str:
     """PATH for the server and the panes it launches: ``extra_path`` first.
@@ -169,8 +184,12 @@ def console_script(name: str) -> str:
     an absolute path keeps the MCP server launchable from a pane whose PATH the
     profile cannot control.
     """
-    candidate = Path(sys.executable).parent / name
-    return str(candidate) if candidate.exists() else name
+    here = Path(sys.executable).parent
+    names = [name + ".exe", name] if sys.platform == "win32" else [name]
+    for n in names:
+        if (here / n).exists():
+            return str(here / n)
+    return name
 
 
 def ensure_dirs() -> None:

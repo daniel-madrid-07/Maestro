@@ -117,7 +117,7 @@ class RestoreOrphanTest(unittest.TestCase):
             state_file.write_text(json.dumps(state))
             with mock.patch.object(config, "STATE_FILE", state_file), \
                  mock.patch.object(config, "HOME", Path(tmp)), \
-                 mock.patch.object(fleet_mod.tmux, "list_sessions", return_value=[]):
+                 mock.patch.object(fleet_mod.console, "list_sessions", return_value=[]):
                 f = Fleet()
                 f.restore()
             self.assertEqual(f.terminals, {})

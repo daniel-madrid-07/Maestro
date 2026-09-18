@@ -11,6 +11,7 @@ import json
 import os
 import re
 import stat
+import sys
 import threading
 from pathlib import Path
 
@@ -180,13 +181,19 @@ def ensure_trusted(cwd: str) -> None:
     renderer (keys sent right after it paints are dropped), so it is avoided
     entirely; ``answer_startup_dialogs`` remains as the fallback.
     """
-    candidates = {cwd, os.path.realpath(cwd)}
+    candidates = _project_keys(cwd)
 
     def mutate(cfg: dict) -> bool:
         projects = cfg.setdefault("projects", {})
         if not isinstance(projects, dict):
             projects = cfg["projects"] = {}
         changed = False
+        # A machine whose only sign-in was `claude auth login` (the installer's)
+        # has never seen the first-run theme picker, and every session would
+        # open on it. Mark it done, as Claude Code itself does after the picker.
+        if not cfg.get("hasCompletedOnboarding"):
+            cfg["hasCompletedOnboarding"] = True
+            changed = True
         for path in candidates:
             entry = projects.get(path)
             if not isinstance(entry, dict):
@@ -201,9 +208,23 @@ def ensure_trusted(cwd: str) -> None:
         _rewrite_json(path, mutate)
 
 
+def _project_keys(cwd: str) -> set[str]:
+    """Every spelling Claude Code may key this directory under in ``projects``.
+
+    It keys by the process's working directory: symlinks resolved on POSIX,
+    and on Windows seen both as ``C:\\a\\b`` and as ``c:/a/b``.
+    """
+    keys = {cwd, os.path.realpath(cwd)}
+    if sys.platform == "win32":
+        for k in list(keys):
+            slashed = k.replace("\\", "/")
+            keys |= {slashed, slashed[:1].lower() + slashed[1:], slashed[:1].upper() + slashed[1:]}
+    return keys
+
+
 def forget_trusted(cwd: str) -> None:
     """Drop the trust entries ``ensure_trusted`` made for a one-off directory."""
-    candidates = {cwd, os.path.realpath(cwd)}
+    candidates = _project_keys(cwd)
 
     def mutate(cfg: dict) -> bool:
         projects = cfg.get("projects")
@@ -223,14 +244,8 @@ def forget_trusted(cwd: str) -> None:
         _rewrite_json(path, mutate)
 
 
-def build_command(
-    terminal_id: str, profile: Profile, model: str | None, prompt_file: Path, mcp_file: Path | None
-) -> str:
-    """The shell line that starts Claude Code for one terminal.
-
-    Any ``CLAUDE*`` variable inherited from a parent Claude session is unset first,
-    otherwise the child believes it is nested and disables parts of itself.
-    """
+def launch_argv(profile: Profile, model: str | None, prompt_file: Path, mcp_file: Path | None) -> list[str]:
+    """The command that starts Claude Code for one terminal, as an argv."""
     parts = [os.path.expanduser(config.CLAUDE)]
     if profile.permission_mode:
         parts += ["--permission-mode", profile.permission_mode]
@@ -244,11 +259,18 @@ def build_command(
     parts += ["--append-system-prompt-file", str(prompt_file)]
     if mcp_file is not None:
         parts += ["--mcp-config", str(mcp_file), "--strict-mcp-config"]
-    unset = (
-        "unset $(env | sed -n 's/^\\(CLAUDE[A-Z_]*\\)=.*/\\1/p' "
-        "| grep -v CLAUDE_CONFIG_DIR) 2>/dev/null; "
-    )
-    return unset + tmux.quote(parts)
+    return parts
+
+
+def build_command(
+    terminal_id: str, profile: Profile, model: str | None, prompt_file: Path, mcp_file: Path | None
+) -> str:
+    """The shell line the tmux backend types to start Claude Code.
+
+    Any ``CLAUDE*`` variable inherited from a parent Claude session is unset first,
+    otherwise the child believes it is nested and disables parts of itself.
+    """
+    return tmux.UNSET_CLAUDE_ENV + tmux.quote(launch_argv(profile, model, prompt_file, mcp_file))
 
 
 def write_launch_files(terminal_id: str, profile: Profile) -> tuple[Path, Path | None]:
@@ -285,6 +307,20 @@ def remove_launch_files(terminal_id: str) -> None:
         (config.TMP / f"{terminal_id}{suffix}").unlink(missing_ok=True)
 
 
+# Unknown first-run dialogs answered with their default before giving up on
+# them: enough for a new build's handful, not enough to loop forever.
+MAX_DEFAULT_ANSWERS = 5
+
+
+def _dialog_title(tail: str) -> str:
+    """The first line of text in a dialog, to tell one dialog from the next."""
+    for line in tail.split("\n"):
+        text = line.strip()
+        if text and not RAIL.search(text) and not WAITING.search(text):
+            return text[:80]
+    return tail[-80:]
+
+
 def answer_startup_dialogs(pane: str, screen: str, answered: set[str]) -> bool:
     """Dismiss a startup dialog if one is on screen. Returns True when a key was sent.
 
@@ -292,31 +328,45 @@ def answer_startup_dialogs(pane: str, screen: str, answered: set[str]) -> bool:
     """
     import time
 
+    from maestro.term import backend as term
+
     tail = "\n".join(rows_of(screen)[-20:])
     if TRUST in tail and "trust" not in answered:
         answered.add("trust")
         # Let the renderer settle before it can accept keys, then re-read to see
         # which option is highlighted (newer builds preselect "No, exit").
         time.sleep(1.0)
-        fresh = tmux.capture(pane, 20)
+        fresh = term.capture(pane, 20)
         yes_line = next((ln for ln in fresh.split("\n") if TRUST in ln), "")
         if not re.search(r"[>❯]", yes_line.split(TRUST)[0]):
-            tmux.send_key(pane, "Down")
+            term.send_key(pane, "Down")
             time.sleep(0.4)
-        tmux.send_key(pane, "Enter")
+        term.send_key(pane, "Enter")
         return True
     if BYPASS in tail and "bypass" not in answered:
         answered.add("bypass")
         time.sleep(1.0)
-        tmux.send_key(pane, "Down")
+        term.send_key(pane, "Down")
         time.sleep(0.4)
-        tmux.send_key(pane, "Enter")
+        term.send_key(pane, "Enter")
         return True
     if UPGRADE.search(tail) and "upgrade" not in answered:
         answered.add("upgrade")
         time.sleep(0.5)
-        tmux.send_key(pane, "2")
+        term.send_key(pane, "2")
         return True
+    # Any other option dialog before the first prompt is a first-run notice this
+    # build shows once (e.g. "Claude in Chrome extension detected"). Its default
+    # is the conservative choice by design ("keep browser tools off"); taking it
+    # is what an unattended session needs. Without this the session sits there
+    # until the start times out.
+    if WAITING.search(tail) and not boxed_prompt(rows_of(screen)[-8:]):
+        key = "default:" + _dialog_title(tail)
+        if key not in answered and sum(a.startswith("default:") for a in answered) < MAX_DEFAULT_ANSWERS:
+            answered.add(key)
+            time.sleep(1.0)
+            term.send_key(pane, "Enter")
+            return True
     return False
 
 
@@ -325,8 +375,7 @@ def looks_ready(screen: str) -> bool:
 
 
 def shell_is_back(pane: str) -> bool:
-    """True when the pane's foreground process is a shell again (Claude exited)."""
-    try:
-        return tmux.pane_command(pane) in tmux.SHELLS
-    except tmux.TmuxError:
-        return False
+    """True when Claude has exited: its shell is back (tmux) or its process is gone."""
+    from maestro.term import backend as term
+
+    return term.agent_exited(pane)

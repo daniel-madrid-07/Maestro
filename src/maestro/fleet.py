@@ -6,6 +6,7 @@ window running Claude Code. Terminals created by another terminal remember
 it as ``caller_id`` so a worker can answer without knowing the address.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -31,10 +32,27 @@ DELIVERY_GAP = 3.0
 INTERRUPT_SETTLE = 2.0
 # answer_prompt() tokens sent as a key press rather than typed.
 ANSWER_KEYS = {k.lower(): k for k in ("Enter", "Escape", "Up", "Down", "Tab", "Space")}
+# Elapsed-time counters ("12s", "1m 3s") tick on a pane that is otherwise frozen.
+ELAPSED_RE = re.compile(r"\b\d+(?:\.\d+)?\s*[smh]\b")
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def screen_digest(screen: str) -> str:
+    """Hash of what a processing pane shows, minus what moves on its own.
+
+    The spinner line animates and counts seconds and tokens even when nothing
+    is happening, so it is dropped and elapsed times are blanked; anything
+    else changing means real progress.
+    """
+    rows = [
+        ELAPSED_RE.sub("#", ln)
+        for ln in screen.split("\n")
+        if not claude.SPINNER.search(ln) and claude.INTERRUPT not in ln
+    ]
+    return hashlib.sha1("\n".join(rows).encode("utf-8", "replace")).hexdigest()
 
 
 class InitError(RuntimeError):
@@ -67,6 +85,10 @@ class Terminal:
     last_delivery: float = 0.0
     last_active: str = field(default_factory=now_iso)
     inbox: deque = field(default_factory=deque)
+    waiting_since: str | None = None
+    screen_hash: str | None = None  # of the last processing screen (see screen_digest)
+    screen_changed: float = 0.0
+    stuck: bool = False
 
     def public(self) -> dict:
         return {
@@ -85,6 +107,8 @@ class Terminal:
             "pending_messages": len(self.inbox),
             "created": self.created,
             "last_active": self.last_active,
+            "stuck": self.stuck,
+            "waiting_since": self.waiting_since,
         }
 
     def persisted(self) -> dict:
@@ -523,12 +547,33 @@ class Fleet:
                 term.last_active = now_iso()
                 if status == "error":
                     events.log.emit("terminal_error", term.id, term.session, agent_name=term.agent_profile, reason="claude exited")
+                if status == "waiting_user_answer":
+                    term.waiting_since = term.last_active
+                    events.log.emit("terminal_waiting", term.id, term.session, agent_name=term.agent_profile)
+                else:
+                    term.waiting_since = None
+            self._check_stuck(term, status, screen, now)
             deliver = (
                 term.inbox and status in READY_STATES and now - term.last_delivery > DELIVERY_GAP
             )
             msg = term.inbox.popleft() if deliver else None
         if msg:
             self.send_input(term.id, msg["message"], msg["sender_id"], msg["orchestration_type"])
+
+    def _check_stuck(self, term: Terminal, status: str, screen: str, now: float) -> None:
+        """Report a processing pane whose screen has not moved for STUCK_AFTER, once."""
+        if status != "processing":
+            term.screen_hash, term.stuck = None, False
+            return
+        digest = screen_digest(screen)
+        if digest != term.screen_hash:
+            term.screen_hash, term.screen_changed, term.stuck = digest, now, False
+        elif not term.stuck and now - term.screen_changed >= config.STUCK_AFTER:
+            term.stuck = True
+            events.log.emit(
+                "terminal_stuck", term.id, term.session,
+                agent_name=term.agent_profile, seconds=int(now - term.screen_changed),
+            )
 
     def watch(self, stop: threading.Event) -> None:
         while not stop.is_set():

@@ -1,7 +1,7 @@
 """Fleet events: a bounded ring for replay and live fan-out for SSE clients.
 
 The panel reads ``kind`` from a closed vocabulary (launch, handoff,
-a2a_delegation, file_mod, completion, error, other), ``terminal_id``,
+a2a_delegation, file_mod, completion, error, waiting, stuck, other), ``terminal_id``,
 ``timestamp`` and a metadata-only ``detail`` -- message bodies are never
 recorded here.
 """
@@ -20,6 +20,8 @@ _KIND_OF = {
     "post_kill_terminal": "completion",
     "post_kill_session": "completion",
     "terminal_error": "error",
+    "terminal_waiting": "waiting",
+    "terminal_stuck": "stuck",
 }
 
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The panel shows one session at a time.** Several projects at once used
+  to put every agent on the same ring, which read as one fleet. Each
+  session is its own view now: hold both mouse buttons and scroll sideways
+  to move between them (the arrow keys, the edge arrows and a focusable
+  pair of buttons do the same), and the sessions you are not watching wait
+  at the edges as one breathing arrowhead each -- orange when a worker
+  there is waiting on an answer, red when one has failed, so a session you
+  cannot see can still ask for you. The label under an agent is the agent
+  (`worker-d581`) rather than the session name, which now sits in the
+  corner with its place in the row, and a ticker line from another session
+  says which one it came from.
+
 ## 0.1.2 — 2026-09-18
 
 ### Added

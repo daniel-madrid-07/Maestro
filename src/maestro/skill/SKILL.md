@@ -98,6 +98,10 @@ clear success check. Follow the user's own policy when they have one.
 
 ## Notes
 
+- The panel shows one session at a time, so a second fleet does not land on
+  top of the first: the user moves between them with both mouse buttons and a
+  sideways scroll, and the sessions off screen wait at the edges as arrows.
+  Give each session a name that says what it is for; that name is the view.
 - The panel raises a notification when a session is waiting for an answer, is
   stuck, or failed; the user may act before you do.
 - `maestro status` in a shell lists every session with its status, progress and

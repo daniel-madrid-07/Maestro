@@ -159,6 +159,11 @@
   .tag[data-hover="1"] .tag__meter { max-height: 1.6em; opacity: 1; }
   .tag__meter b { font-weight: 500; color: var(--read); }
 
+  /* One session at a time. The ring being left behind dissolves where it
+     stands while the one arriving glides in from the side you scrolled. */
+  .tag { transition: opacity var(--dur-base) var(--ease-out); }
+  .tag[data-going="1"] { opacity: 0; }
+
   /* The whole fleet's figure, under the mark, while the cursor rests on it. */
   #core-meter {
     position: absolute;
@@ -217,6 +222,45 @@
 
   #readout b { font-weight: 500; color: var(--read); }
   #readout[data-link="down"] { color: var(--ev-error); }
+
+  /* Which session of how many, next to its name. */
+  #readout .count { color: color-mix(in oklch, var(--dim) 70%, transparent); }
+
+  /* The same move the two-button scroll makes, for a keyboard and for a screen
+     reader. Out of the way until tabbed to, then a plain pair of chips. */
+  #viewnav {
+    position: fixed;
+    top: var(--sp-4);
+    left: 50%;
+    display: flex;
+    gap: var(--sp-2);
+    transform: translateX(-50%);
+  }
+
+  #viewnav button {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    border: 0;
+    font: inherit;
+    color: var(--dim);
+    background: none;
+  }
+
+  #viewnav button:focus-visible {
+    position: static;
+    width: auto; height: auto;
+    clip: auto;
+    padding: var(--sp-1) var(--sp-3);
+    font-size: var(--t-micro);
+    letter-spacing: var(--track-wide);
+    color: var(--read);
+    background: var(--field-deep);
+    border-radius: var(--r-chip);
+    box-shadow: 0 0 0 1px var(--hair);
+  }
 
   #fleet, #usage { display: flex; gap: var(--sp-6); }
   #usage b[data-tight="1"] { color: var(--ev-error); }
@@ -340,6 +384,11 @@
     <span>Launch them from Claude Code and they will appear here</span>
   </p>
 
+  <nav id="viewnav" aria-label="Sessions">
+    <button type="button" data-step="-1">Previous session</button>
+    <button type="button" data-step="1">Next session</button>
+  </nav>
+
   <div id="readout">
     <span id="fleet">connecting…</span>
     <span id="usage"></span>
@@ -424,6 +473,31 @@
   let eventCount = 0;
   let linkUp = false;
   let corePulse = 0;
+
+  // One project is one view. A fleet is normally many sessions on the same
+  // repository -- twenty tasks in one checkout is an ordinary afternoon -- so
+  // the split that matters to the eye is the working directory, not the session
+  // name. Two projects at once used to share one ring and read as one fleet;
+  // each project gets the field to itself now, and the others wait at the edges.
+  let projects = [];     // working directories, in the order they first appeared
+  let view = null;       // the one on screen
+  const VIEW_KEY = 'maestro.view';
+  const VIEW_FADE = 220; // ms the ring being left behind takes to dissolve
+
+  const onScreen = () => [...nodes.values()].filter(n => n.project === view);
+
+  // A path is too long for the corner, so a project is named by its folder.
+  // Two checkouts that end in the same folder name keep one segment more, which
+  // is what tells `client/visor` from `paper/visor`.
+  function projectName(path) {
+    const parts = String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean);
+    if (!parts.length) return String(path || '');
+    const last = parts[parts.length - 1];
+    const clash = projects.some(p => p !== path && projectName.bare(p) === last);
+    return clash && parts.length > 1 ? parts.slice(-2).join('/') : last;
+  }
+  projectName.bare = (path) =>
+    String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).pop() || String(path || '');
 
   /* ---------- centre mark ------------------------------------------------ */
 
@@ -612,7 +686,7 @@
   // topology -- a worker spawned by another worker still sits on the ring, and
   // the chord between them shows who called whom.
   function layout() {
-    const list = [...nodes.values()];
+    const list = onScreen();
     // The ring widens with the crowd, so neighbouring labels keep their
     // distance instead of colliding as the fleet grows.
     ring = Math.min(W, H) * Math.min(0.29 + list.length * 0.012, 0.40);
@@ -634,9 +708,14 @@
   const HOP_RISE = 200;    // ms the hop itself takes, leaving 800ms at rest
   const HOP_HEIGHT = 2;    // px
 
-  function anchorOf(id) {
+  // A worker whose caller belongs to another project hangs off the centre here:
+  // its parent is not on this field, and a wire to an unseen body reads as a
+  // line to nowhere.
+  function anchorOf(id, project) {
     const n = id && nodes.get(id);
-    return n ? { x: n.x, y: n.y, r: NODE_R } : { x: cx, y: cy, r: CORE_R };
+    return n && n.project === project
+      ? { x: n.x, y: n.y, r: NODE_R }
+      : { x: cx, y: cy, r: CORE_R };
   }
 
   // Trim both ends of a segment so traffic emerges from the edge of a body
@@ -653,6 +732,53 @@
     };
   }
 
+  /* ---------- projects as views -------------------------------------------
+     The fleet is polled whole -- every session keeps running, and the ticker
+     keeps carrying all of it -- but the field draws one session at a time.
+     Hold both mouse buttons and scroll sideways to move between them; the
+     arrows at the edges say how many are waiting on each side. */
+
+  function syncSessions() {
+    const live = [];
+    for (const n of nodes.values()) if (!live.includes(n.project)) live.push(n.project);
+    // Established order is kept, so a project never jumps sideways under the
+    // cursor; new ones join at the right-hand end, where their arrow appears.
+    projects = projects.filter(p => live.includes(p)).concat(live.filter(p => !projects.includes(p)));
+    if (!projects.length) { view = null; return; }
+    if (projects.includes(view)) return;
+    // First run, or the project on screen just ended: fall back to the one the
+    // panel was last left on, then to the first.
+    let saved = null;
+    try { saved = localStorage.getItem(VIEW_KEY); } catch { /* private window */ }
+    setView(projects.includes(saved) ? saved : projects[0], 0);
+  }
+
+  // `dir` is the direction the field travels: +1 when moving to the project on
+  // the right, so its ring arrives from the right. 0 for a switch nobody asked
+  // for (the last of its sessions ending), which fades in where it stands.
+  function setView(name, dir) {
+    if (!name || name === view) return;
+    const now = performance.now();
+    for (const n of nodes.values()) if (n.project === view) n.leftAt = now;
+    view = name;
+    try { localStorage.setItem(VIEW_KEY, name); } catch { /* nothing to keep */ }
+    layout();
+    for (const n of onScreen()) {
+      n.shownAt = now;
+      n.x = reduceMotion || !dir ? n.tx : n.tx + dir * W * 0.32;
+      n.y = n.ty;
+    }
+    paintCoreMeter();
+    paintState();
+  }
+
+  const stepView = (dir) => {
+    const i = projects.indexOf(view);
+    // No wrap-around: the edge arrows count what is actually to each side, and
+    // looping would make them lie.
+    if (i >= 0 && projects[i + dir]) setView(projects[i + dir], dir);
+  };
+
   /* ---------- data ------------------------------------------------------- */
 
   async function api(path, init) {
@@ -661,11 +787,12 @@
     return r.status === 204 ? null : r.json();
   }
 
-  function makeNode(t, sessionName) {
+  function makeNode(t, sessionName, project) {
     return {
       id: t.id,
       label: labelFor(t, sessionName),
       session: sessionName,
+      project: project || sessionName,   // which view it belongs to
       parent: t.caller_id || null,
       status: t.status || 'unknown',
       model: t.model || '',
@@ -674,6 +801,8 @@
       progress: progressOf(t),
       stuck: !!t.stuck,   // processing, but the screen has not moved for minutes
       born: performance.now(),
+      shownAt: performance.now(),  // when it last entered the view (it fades in)
+      leftAt: 0,                   // when it last left it (it fades out)
       activity: 0,
       surge: 0,           // 1 right after traffic crossed, decaying to rest
       surgeKind: null,    // what crossed, which is what colours the dust
@@ -743,11 +872,15 @@
         let detail;
         try { detail = await api('/sessions/' + encodeURIComponent(name)); }
         catch { continue; }
+        // The session's own directory, not the terminal's: a worker on an
+        // isolated worktree still belongs to the repository it branched from.
+        const project = s.working_directory || detail.working_directory || name;
         for (const t of (detail.terminals || [])) {
           if (!t || !t.id) continue;
           seen.add(t.id);
           const existing = nodes.get(t.id);
           if (existing) {
+            existing.project = project;
             existing.status = t.status || existing.status;
             existing.stuck = !!t.stuck;
             existing.progress = progressOf(t);
@@ -755,10 +888,11 @@
             existing.label = labelFor(t, name);
             existing.profile = t.agent_profile || existing.profile;
           } else {
-            nodes.set(t.id, makeNode(t, name));
+            nodes.set(t.id, makeNode(t, name, project));
             // Sessions already running when the panel opens did not just join;
             // announcing them would date every reload as a fresh launch.
-            if (!firstPoll) note('launch', `${t.agent_profile || t.id} joined`);
+            if (!firstPoll) note('launch', `${labelFor(t, name)} joined`
+              + (project === view ? '' : ` in ${projectName(project)}`));
           }
         }
       }
@@ -769,6 +903,7 @@
       if (secondOpinion) {
         await Promise.all([...nodes.values()].filter(n => seen.has(n.id)).map(refineStatus));
       }
+      syncSessions();
       paintCoreMeter();
       layout();
     } catch {
@@ -793,6 +928,73 @@
     }
     nodes.delete(id);
   }
+
+  /* ---------- moving between projects -------------------------------------
+     Both buttons down and a sideways scroll. Two buttons because one of them
+     is already spoken for -- a click opens a worker's profile -- and because
+     nothing else on this page can be triggered by accident that way. */
+
+  const WHEEL_STEP = 55;    // accumulated delta that counts as one move
+  const SWITCH_REST = 300;  // ms before the next move, so one flick moves one session
+  const EDGE_ZONE = 76;     // px from the edge where the arrows take a click
+
+  let bothDown = false;
+  let wheelAcc = 0;
+  let lastSwitch = 0;
+  let menuBlocked = 0;      // right-button release after a gesture opens no menu
+  let clickBlocked = 0;
+
+  function gesture(dir) {
+    const now = performance.now();
+    if (now - lastSwitch < SWITCH_REST) return;
+    lastSwitch = now;
+    menuBlocked = now + 800;
+    clickBlocked = now + 800;
+    stepView(dir);
+  }
+
+  addEventListener('mousedown', (e) => {
+    bothDown = (e.buttons & 3) === 3;
+    if (bothDown) { menuBlocked = performance.now() + 800; wheelAcc = 0; }
+  });
+
+  addEventListener('mouseup', (e) => { if ((e.buttons & 3) !== 3) bothDown = false; });
+  addEventListener('blur', () => { bothDown = false; });
+
+  addEventListener('contextmenu', (e) => {
+    if (bothDown || performance.now() < menuBlocked) e.preventDefault();
+  });
+
+  addEventListener('wheel', (e) => {
+    if (!bothDown) return;
+    e.preventDefault();   // the page does not scroll; the fleet does
+    // A mouse only has the vertical wheel, a trackpad has both. Whichever axis
+    // the hand actually moved is the one that counts.
+    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    wheelAcc += d;
+    if (Math.abs(wheelAcc) >= WHEEL_STEP) {
+      gesture(Math.sign(wheelAcc));
+      wheelAcc = 0;
+    }
+  }, { passive: false });
+
+  addEventListener('keydown', (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key === 'ArrowRight') stepView(1);
+    else if (e.key === 'ArrowLeft') stepView(-1);
+    else return;
+    e.preventDefault();
+  });
+
+  for (const b of document.querySelectorAll('#viewnav button')) {
+    b.addEventListener('click', () => stepView(Number(b.dataset.step)));
+  }
+
+  // Which projects sit to one side of the one on screen, nearest first.
+  const aside = (side) => {
+    const i = projects.indexOf(view);
+    return i < 0 ? [] : side < 0 ? projects.slice(0, i).reverse() : projects.slice(i + 1);
+  };
 
   /* ---------- live events ------------------------------------------------ */
 
@@ -820,11 +1022,12 @@
       for (const ev of events.slice(-5)) {
         const kind = ev.kind in KIND ? ev.kind : 'other';
         const d = ev.detail || {};
+        const from = where(ev.terminal_id);
         note(kind,
-          kind === 'launch' ? `${d.agent_name || nameOf(ev.terminal_id)} joined`
-          : kind === 'completion' ? `${nameOf(ev.terminal_id)} finished`
-          : kind === 'error' ? `${nameOf(ev.terminal_id)} failed`
-          : kind === 'waiting' || kind === 'stuck' ? `${labelOf(ev)} ${KIND[kind].verb}`
+          kind === 'launch' ? `${d.agent_name || nameOf(ev.terminal_id)} joined${from}`
+          : kind === 'completion' ? `${nameOf(ev.terminal_id)} finished${from}`
+          : kind === 'error' ? `${nameOf(ev.terminal_id)} failed${from}`
+          : kind === 'waiting' || kind === 'stuck' ? `${labelOf(ev)} ${KIND[kind].verb}${from}`
           : d.event_type === 'terminal_progress' ? `${labelOf(ev)} ${d.percent}%${d.note ? ' — ' + d.note : ''}`
           : kind === 'other' ? `${labelOf(ev)} ${String(d.event_type || 'event').replace(/^terminal_/, '')}`
           : `${senderName(d.sender)} → ${nameOf(d.receiver || ev.terminal_id)}`,
@@ -853,6 +1056,13 @@
   }
 
   const nameOf = (id) => (id && nodes.get(id)?.label) || (id ? 'agent' : 'Claude');
+
+  // Which session a line came from -- named only while you are watching a
+  // different one. On its own field it would sit on every line and say nothing.
+  const where = (id) => {
+    const n = id && nodes.get(id);
+    return n && n.project !== view ? ` in ${projectName(n.project)}` : '';
+  };
 
   // Traffic whose sender is not a terminal in the fleet came from outside it --
   // the orchestrator driving the run. That is Claude, not an anonymous agent.
@@ -907,7 +1117,7 @@
       // The wire shows that something crossed; the ticker is where it says
       // what. CAO strips message bodies from its events, so the kind of
       // dispatch is the most that can honestly be named here.
-      note(kind, `${senderName(d.sender)} → ${nameOf(to)}  ${KIND[kind].verb}`);
+      note(kind, `${senderName(d.sender)} → ${nameOf(to)}  ${KIND[kind].verb}${where(to)}`);
     } else if (kind === 'launch') {
       corePulse = 1;
       pollFleet();
@@ -915,25 +1125,25 @@
       const n = nodes.get(ev.terminal_id);
       if (n) n.status = 'completed';
       send(ev.terminal_id, null, kind);
-      note(kind, `${nameOf(ev.terminal_id)} finished`);
+      note(kind, `${nameOf(ev.terminal_id)} finished${where(ev.terminal_id)}`);
     } else if (kind === 'error') {
       const n = nodes.get(ev.terminal_id);
       if (n) n.status = 'error';
       send(ev.terminal_id, null, kind);
-      note(kind, `${nameOf(ev.terminal_id)} failed`);
+      note(kind, `${nameOf(ev.terminal_id)} failed${where(ev.terminal_id)}`);
       notify(kind, ev);
     } else if (kind === 'waiting' || kind === 'stuck') {
       const n = nodes.get(ev.terminal_id);
       if (n && kind === 'waiting') n.status = 'waiting_user_answer';
       if (n && kind === 'stuck') n.stuck = true;
-      note(kind, `${labelOf(ev)} ${KIND[kind].verb}`);
+      note(kind, `${labelOf(ev)} ${KIND[kind].verb}${where(ev.terminal_id)}`);
       notify(kind, ev);
     } else if (kind === 'file_mod') {
-      note(kind, `${nameOf(ev.terminal_id)} touched files`);
+      note(kind, `${nameOf(ev.terminal_id)} touched files${where(ev.terminal_id)}`);
     } else if (d.event_type === 'terminal_progress') {
       const n = nodes.get(ev.terminal_id);
       if (n && typeof d.percent === 'number') n.progress = d.percent;
-      note(kind, `${labelOf(ev)} ${d.percent}%${d.note ? ' — ' + d.note : ''}`);
+      note(kind, `${labelOf(ev)} ${d.percent}%${d.note ? ' — ' + d.note : ''}${where(ev.terminal_id)}`);
     }
 
     const n = nodes.get(ev.terminal_id);
@@ -1013,8 +1223,8 @@
     return mixLch(rest, KIND[n.surgeKind].lch, Math.min(1, n.surge * 1.5));
   }
 
-  function drawLink(ax, ay, bx, by, n, now) {
-    ctx.globalAlpha = 0.07;
+  function drawLink(ax, ay, bx, by, n, now, fade) {
+    ctx.globalAlpha = 0.07 * fade;
     ctx.strokeStyle = C.hair;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -1056,7 +1266,7 @@
       // Fade at both ends so particles emerge and dissolve instead of
       // popping at the node edges.
       const edge = Math.sin(p.t * Math.PI);
-      const alpha = Math.min(1, base * edge * (0.62 + Math.max(n.activity, n.surge) * 0.38));
+      const alpha = Math.min(1, base * edge * (0.62 + Math.max(n.activity, n.surge) * 0.38)) * fade;
 
       if (smear > 2) {
         // dx/dy span the whole link, so the tail must ride the unit vector --
@@ -1098,8 +1308,8 @@
     error: 3
   };
 
-  function drawNode(n, now) {
-    const appear = Math.min(1, (now - n.born) / 600);
+  function drawNode(n, now, fade) {
+    const appear = Math.min(1, (now - Math.max(n.born, n.shownAt)) / 600);
     const ease = 1 - Math.pow(1 - appear, 3);
 
     // A stuck worker is still "processing" to the server; it stops cycling and
@@ -1122,7 +1332,7 @@
                : n.status === 'error' ? 0.6 + 0.4 * Math.sin(now * 0.006)
                : n.status === 'waiting_user_answer' ? 0.62 + 0.38 * Math.sin(now * 0.0035)
                : 1;
-    ctx.globalAlpha = 0.95 * ease * beat;
+    ctx.globalAlpha = 0.95 * ease * beat * fade;
     ctx.fillStyle = n.status === 'error' || stuck ? KIND.error.color
                   : (n.status === 'processing' || n.status === 'waiting_user_answer') ? C.signal
                   : C.dim;
@@ -1142,6 +1352,60 @@
 
     ctx.fillText(GLYPHS[idx], n.x, n.y + bob);
     ctx.globalAlpha = 1;
+  }
+
+  /* ---------- the projects you are not looking at --------------------------
+     One arrowhead per project waiting on that side, nearest first, made of the
+     same grains the wires carry rather than drawn as a solid glyph. Each one
+     breathes -- leaning out and brightening -- so they read as work still
+     running, not as buttons. A project with a worker waiting on an answer
+     warms to the signal colour; one with a failure goes red, which is how you
+     learn about it without being on that screen. */
+
+  const EDGE_PAD = 30;     // px from the window edge to the nearest arrowhead
+  const EDGE_GAP = 16;     // px between stacked arrowheads
+  const EDGE_MAX = 4;      // drawn per side; past that the readout's count speaks
+  const EDGE_ARM = 8;      // px each arm falls back from the point
+  const EDGE_SPREAD = 7;   // px each arm rises from the point
+
+  function edgeTint(project) {
+    let worst = 0;
+    for (const n of nodes.values()) {
+      if (n.project !== project) continue;
+      if (n.status === 'error' || n.stuck) worst = 2;
+      else if (n.status === 'waiting_user_answer' && worst < 2) worst = 1;
+    }
+    return worst === 2 ? KIND.error.color : worst === 1 ? C.signal : C.dim;
+  }
+
+  function drawArrow(x, y, side, color, k, now) {
+    const wave = reduceMotion ? 0.55 : 0.5 + 0.5 * Math.sin(now * 0.0016 - k * 0.7);
+    // Depth: the nearest project is the brightest, the ones behind it recede.
+    const weight = (k === 0 ? 1 : 0.72 - k * 0.14) * (0.66 + wave * 0.34);
+    const lean = side * wave * 2.4;   // the breath moves it, not just its alpha
+    ctx.fillStyle = color;
+    for (let arm = -1; arm <= 1; arm += 2) {
+      for (let s = 0; s <= 2; s++) {
+        if (s === 0 && arm > 0) continue;   // the point is one grain, not two
+        const t = s / 2;
+        ctx.globalAlpha = Math.min(1, weight * (s === 0 ? 1 : 0.86 - t * 0.16));
+        ctx.beginPath();
+        ctx.arc(x + lean - side * t * EDGE_ARM, y + arm * t * EDGE_SPREAD,
+                s === 0 ? 2.2 : 1.75, 0, TAU);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawEdges(now) {
+    if (projects.length < 2) return;
+    for (const side of [-1, 1]) {
+      aside(side).slice(0, EDGE_MAX).forEach((name, k) => {
+        const x = side < 0 ? EDGE_PAD + k * EDGE_GAP : W - EDGE_PAD - k * EDGE_GAP;
+        drawArrow(x, cy, side, edgeTint(name), k, now);
+      });
+    }
   }
 
   function drawCorePulse() {
@@ -1205,7 +1469,19 @@
     ctx.fillStyle = C.field;
     ctx.fillRect(0, 0, W, H);
 
+    const drawing = [];
     for (const n of nodes.values()) {
+      // A project that is no longer on screen dissolves where it stands, then
+      // stops costing anything: no easing, no tag, no particles.
+      const here = n.project === view;
+      const fade = here ? 1 : 1 - Math.min(1, (now - n.leftAt) / VIEW_FADE);
+      if (fade <= 0) {
+        if (n.el) { n.el.remove(); n.el = null; }
+        continue;
+      }
+      if (n.el) n.el.dataset.going = here ? '0' : '1';
+      drawing.push([n, fade]);
+
       // Ease into position so a re-layout after a launch glides instead of
       // teleporting.
       n.x += (n.tx - n.x) * 0.06;
@@ -1215,27 +1491,39 @@
       if (now < n.surgeUntil) n.surge = 1;
       else n.surge *= 0.955;
 
-      const s = span(anchorOf(n.parent), { x: n.x, y: n.y, r: NODE_R });
-      drawLink(s.ax, s.ay, s.bx, s.by, n, now);
+      const s = span(anchorOf(n.parent, n.project), { x: n.x, y: n.y, r: NODE_R });
+      drawLink(s.ax, s.ay, s.bx, s.by, n, now, fade);
     }
 
     drawCorePulse();
+    drawEdges(now);
     paintMark(now);
-    for (const n of nodes.values()) { drawNode(n, now); syncTag(n); }
+    for (const [n, fade] of drawing) { drawNode(n, now, fade); syncTag(n); }
 
     requestAnimationFrame(frame);
   }
 
   function paintState() {
-    const n = nodes.size;
+    const here = onScreen().length;
     core.dataset.live = linkUp ? '1' : '0';
-    emptyMsg.dataset.show = (n === 0 && linkUp) ? '1' : '0';
+    emptyMsg.dataset.show = (nodes.size === 0 && linkUp) ? '1' : '0';
     readout.dataset.link = linkUp ? 'up' : 'down';
-    fleetOut.innerHTML = linkUp
-      ? `<span><b>${n}</b> ${n === 1 ? 'session' : 'sessions'}</span>
-         <span><b>${eventCount}</b> ${eventCount === 1 ? 'event' : 'events'}</span>`
-      : '<span>off</span>';
+    if (!linkUp) { fleetOut.innerHTML = '<span>off</span>'; return; }
+
+    // The project you are on, where it sits in the row, and what is running on
+    // it. The count only appears once there is more than one project to be in.
+    const place = projects.length > 1
+      ? ` <span class="count">${projects.indexOf(view) + 1}/${projects.length}</span>` : '';
+    const name = view ? `<span><b>${escapeHtml(projectName(view))}</b>${place}</span>` : '';
+    fleetOut.innerHTML = name
+      + `<span><b>${here}</b> ${here === 1 ? 'agent' : 'agents'}</span>`
+      + `<span><b>${eventCount}</b> ${eventCount === 1 ? 'event' : 'events'}</span>`;
   }
+
+  // Project names are directories the fleet was pointed at, so they are text,
+  // not markup.
+  const escapeHtml = (s) => String(s).replace(/[&<>"]/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   /* ---------- subscription usage ------------------------------------------
      Served by the local panel, which holds the OAuth token: the browser only
@@ -1281,18 +1569,19 @@
 
   const bareName = (session) => String(session || '').replace(/^(?:cao|mx)-/, '');
 
-  // What an agent is ON matters more at a glance than which profile it runs,
-  // so the task (its session name) is the label. A session named after nothing
-  // in particular falls back to the profile. The profile and model are one
-  // click away.
+  // What an agent is ON matters more at a glance than which profile it runs, so
+  // the task (its session name) is the label -- and inside a project's view,
+  // where every agent shares the repository, the task is exactly what tells two
+  // of them apart. A session named after nothing in particular falls back to
+  // the terminal's own name. The profile and model are one click away.
   function labelFor(t, sessionName) {
     const task = bareName(sessionName);
     const generic = !task || /^s-[0-9a-f]{6}$/.test(task);
-    return generic ? (t.agent_profile || t.name || t.id) : task;
+    return generic ? (t.name || t.agent_profile || t.id) : task;
   }
 
   function nodeAt(x, y) {
-    for (const n of nodes.values()) {
+    for (const n of onScreen()) {
       if (Math.hypot(x - n.x, y - n.y) <= NODE_R + 10) return n;
       const r = n.el && n.el.getBoundingClientRect();
       if (r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return n;
@@ -1300,9 +1589,22 @@
     return null;
   }
 
+  // Which way the arrows at this point would take you, if any.
+  const edgeAt = (x) => {
+    const side = x < EDGE_ZONE ? -1 : x > W - EDGE_ZONE ? 1 : 0;
+    return side && aside(side).length ? side : 0;
+  };
+
   addEventListener('click', (e) => {
     askToNotify();   // browsers only grant the prompt inside a user gesture
+    // The click that ends a two-button scroll is part of the gesture, not a
+    // request to open anything.
+    if (performance.now() < clickBlocked) return;
     const hit = nodeAt(e.clientX, e.clientY);
+    if (!hit) {
+      const side = edgeAt(e.clientX);
+      if (side) { stepView(side); return; }
+    }
     for (const n of nodes.values()) n.titled = n === hit ? !n.titled : false;
   });
 
@@ -1336,12 +1638,12 @@
       coreMeter.id = 'core-meter';
       overlay.appendChild(coreMeter);
     }
-    const known = [...nodes.values()].map(percentOf).filter(p => p != null);
+    const known = onScreen().map(percentOf).filter(p => p != null);
     const mean = known.length ? Math.round(known.reduce((a, b) => a + b, 0) / known.length) : null;
     const html = meterHtml(mean) + (known.length ? ` <span>of ${known.length}</span>` : '');
     if (coreMeter.innerHTML !== html) coreMeter.innerHTML = html;
     coreMeter.style.transform = `translate(${cx - 60}px, ${cy + 64}px)`;
-    const show = coreHover && nodes.size ? '1' : '0';
+    const show = coreHover && onScreen().length ? '1' : '0';
     if (coreMeter.dataset.show !== show) coreMeter.dataset.show = show;
   }
 
@@ -1349,7 +1651,7 @@
     addEventListener('mousemove', (e) => {
       hovered = nodeAt(e.clientX, e.clientY);
       coreHover = Math.hypot(e.clientX - cx, e.clientY - cy) <= CORE_R;
-      canvas.style.cursor = hovered ? 'pointer' : '';
+      canvas.style.cursor = hovered || (!hovered && edgeAt(e.clientX)) ? 'pointer' : '';
       paintCoreMeter();
     });
   }
@@ -1360,21 +1662,30 @@
 
   function runDemo() {
     linkUp = true;
+    // Three projects with their own sessions, which is the shape a real
+    // afternoon has: the panel opens on the first and the other two wait at
+    // the edge, one of them with a question and one with a failure.
+    const P1 = '/home/you/code/snipe-it', P2 = '/home/you/papers/visor', P3 = '/home/you/code/maestro';
     const cast = [
-      { id: 'a1', label: 'developer', status: 'processing' },
-      { id: 'b2', label: 'reviewer', status: 'idle' },
-      { id: 'c3', label: 'developer', status: 'waiting_user_answer' },
-      { id: 'd4', label: 'retrospector', status: 'completed' }
+      { id: 'a1', label: 'worker', model: 'opus', status: 'processing', session: 'mx-weather', project: P1 },
+      { id: 'b2', label: 'reviewer', model: 'opus', status: 'idle', session: 'mx-controls', project: P1 },
+      { id: 'c3', label: 'worker', model: 'sonnet', status: 'waiting_user_answer', session: 'mx-visor-mapa', project: P2 },
+      { id: 'd4', label: 'worker', model: 'opus', status: 'completed', session: 'mx-i18n-33', project: P1 },
+      { id: 'e5', label: 'code_supervisor', model: 'opus', status: 'processing', session: 'mx-visor-voto', project: P2 },
+      { id: 'f6', label: 'worker', model: 'sonnet', status: 'error', session: 'mx-installer', project: P3 }
     ];
     cast.forEach((c, i) => {
       setTimeout(() => {
-        const n = makeNode({ id: c.id, agent_profile: c.label, status: c.status }, 'demo');
-        if (i === 3) n.parent = 'a1';
+        const n = makeNode(
+          { id: c.id, name: `${c.label}-${c.id}`, agent_profile: c.label, status: c.status, model: c.model },
+          c.session, c.project);
+        if (c.id === 'd4') n.parent = 'a1';
         nodes.set(c.id, n);
+        syncSessions();
         layout();
         corePulse = 1;
         eventCount++;
-        note('launch', `${c.label} joined`);
+        note('launch', `${bareName(c.session)} joined${where(c.id)}`);
         paintState();
       }, 400 + i * 700);
     });
@@ -1391,9 +1702,9 @@
       send(from, to, kind);
       if (fromCore) corePulse = 1;
       note(kind,
-        kind === 'completion' ? `${nameOf(to)} finished`
-        : kind === 'error' ? `${nameOf(to)} failed`
-        : `${nameOf(from)} → ${nameOf(to)}  ${KIND[kind].verb}`);
+        kind === 'completion' ? `${nameOf(to)} finished${where(to)}`
+        : kind === 'error' ? `${nameOf(to)} failed${where(to)}`
+        : `${nameOf(from)} → ${nameOf(to)}  ${KIND[kind].verb}${where(to)}`);
       eventCount++;
       paintState();
     }, 1900);

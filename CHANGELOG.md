@@ -4,17 +4,26 @@
 
 ### Changed
 
-- **The panel shows one session at a time.** Several projects at once used
-  to put every agent on the same ring, which read as one fleet. Each
-  session is its own view now: hold both mouse buttons and scroll sideways
-  to move between them (the arrow keys, the edge arrows and a focusable
-  pair of buttons do the same), and the sessions you are not watching wait
-  at the edges as one breathing arrowhead each -- orange when a worker
-  there is waiting on an answer, red when one has failed, so a session you
-  cannot see can still ask for you. The label under an agent is the agent
-  (`worker-d581`) rather than the session name, which now sits in the
-  corner with its place in the row, and a ticker line from another session
-  says which one it came from.
+- **The panel shows one project at a time.** Two projects at once used to put
+  every agent on the same ring, which read as one fleet -- and a fleet is
+  normally many sessions on one repository, so the split that matters is the
+  working directory, not the session name. Each project is its own view now:
+  hold both mouse buttons and drag sideways to move between them, or scroll
+  sideways, or press the arrow keys, or click the arrows at the edge (a
+  focusable pair of buttons does the same). The projects you are not watching
+  wait at the edges as one arrowhead each, drawn from the same grains the
+  wires carry, each grain wandering on its own period so the head swells and
+  sags instead of pulsing as a rigid shape. An arrow warms to the signal
+  colour when a worker there is waiting on an answer and goes red when one has
+  failed, so a project off screen can still ask for you. The corner names the
+  project and its place in the row, and a ticker line from elsewhere says
+  which project it came from, for as long as you are somewhere else.
+- **Resting on an agent no longer shoves the field around.** What a node says
+  about itself -- its profile and model, its reported percentage -- hangs
+  below its name out of the flow and cross-fades into place, instead of
+  opening a height that moved every label under it with no easing at all.
+- **Resting on the mark says where you are**: the project on screen, and how
+  far its agents report they have got.
 
 ## 0.1.2 — 2026-09-18
 

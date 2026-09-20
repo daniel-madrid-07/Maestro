@@ -129,57 +129,77 @@
     color: var(--read);
   }
 
-  /* The task's title (its session name), shown on request under the profile
-     name. Folded away until the node is clicked. */
-  .tag__title {
-    display: block;
-    max-height: 0;
-    font-size: var(--t-micro);
-    letter-spacing: var(--track-wide);
-    color: var(--dim);
-    opacity: 0;
-    overflow: hidden;
-    transition: opacity var(--dur-base) var(--ease-out);
+  /* What a node can say about itself, hung below its name rather than folded
+     into it: opening a height moves the name and every label under it, and no
+     easing makes a reflow smooth. Out of the flow, both lines cross-fade and
+     rise into place, and nothing else on the field shifts. */
+  .tag__under {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    width: 100%;
+    pointer-events: none;
   }
 
-  .tag[data-titled="1"] .tag__title { max-height: 1.6em; opacity: 1; }
-
-  /* How far along the task is, on hover only: what the agent last reported. */
+  .tag__title,
   .tag__meter {
     display: block;
-    max-height: 0;
     font-size: var(--t-micro);
     letter-spacing: var(--track-wide);
     color: var(--dim);
     opacity: 0;
-    overflow: hidden;
-    transition: opacity var(--dur-fast) var(--ease-out);
+    transform: translateY(-4px);
+    transition: opacity var(--dur-base) var(--ease-out),
+                transform var(--dur-base) var(--ease-out);
   }
 
-  .tag[data-hover="1"] .tag__meter { max-height: 1.6em; opacity: 1; }
+  .tag[data-titled="1"] .tag__title,
+  .tag[data-hover="1"] .tag__meter { opacity: 1; transform: none; }
+
   .tag__meter b { font-weight: 500; color: var(--read); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tag__title, .tag__meter { transform: none; transition: opacity var(--dur-fast) linear; }
+  }
 
   /* One session at a time. The ring being left behind dissolves where it
      stands while the one arriving glides in from the side you scrolled. */
   .tag { transition: opacity var(--dur-base) var(--ease-out); }
   .tag[data-going="1"] { opacity: 0; }
 
-  /* The whole fleet's figure, under the mark, while the cursor rests on it. */
+  /* Where you are and how far it has got, under the mark, while the cursor
+     rests on it. */
   #core-meter {
     position: absolute;
     top: 0; left: 0;
-    width: 120px;
+    width: 240px;
     text-align: center;
     font-size: var(--t-micro);
     letter-spacing: var(--track-wide);
     color: var(--dim);
     opacity: 0;
-    transition: opacity var(--dur-fast) var(--ease-out);
+    transform: translateY(-4px);
+    transition: opacity var(--dur-base) var(--ease-out),
+                transform var(--dur-base) var(--ease-out);
     pointer-events: none;
   }
 
-  #core-meter[data-show="1"] { opacity: 1; }
+  /* The transform carries the position too, so the reveal rides on a variable
+     the layout code sets rather than fighting it. */
+  #core-meter[data-show="1"] { opacity: 1; transform: none; }
   #core-meter b { font-weight: 500; color: var(--read); }
+
+  #core-meter .where {
+    display: block;
+    font-size: var(--t-label);
+    font-weight: 500;
+    letter-spacing: var(--track-tight);
+    color: var(--read);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #core-meter { transform: none; transition: opacity var(--dur-fast) linear; }
+  }
 
 
   /* ---- centre mark ----------------------------------------------------- */
@@ -467,7 +487,7 @@
   const emptyMsg = document.getElementById('empty');
   const ticker = document.getElementById('ticker');
 
-  let W = 0, H = 0, cx = 0, cy = 0, ring = 0;
+  let W = 0, H = 0, cx = 0, cy = 0, ring = 0, coreHalf = 56;
 
   const nodes = new Map();
   let eventCount = 0;
@@ -676,9 +696,15 @@
     canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     cx = W / 2; cy = H / 2;
-    const half = core.offsetWidth / 2 || 56;
-    core.style.transform = `translate(${cx - half}px, ${cy - half}px)`;
+    coreHalf = core.offsetWidth / 2 || 56;
+    placeCore();
     layout();
+  }
+
+  // The mark travels with the field while a gesture pulls it aside, so the
+  // wires stay anchored to it.
+  function placeCore() {
+    core.style.transform = `translate(${cx - coreHalf + dragPull}px, ${cy - coreHalf}px)`;
   }
   addEventListener('resize', resize);
 
@@ -763,6 +789,7 @@
     view = name;
     try { localStorage.setItem(VIEW_KEY, name); } catch { /* nothing to keep */ }
     layout();
+    for (const li of ticker.children) stampWhere(li);
     for (const n of onScreen()) {
       n.shownAt = now;
       n.x = reduceMotion || !dir ? n.tx : n.tx + dir * W * 0.32;
@@ -891,8 +918,7 @@
             nodes.set(t.id, makeNode(t, name, project));
             // Sessions already running when the panel opens did not just join;
             // announcing them would date every reload as a fresh launch.
-            if (!firstPoll) note('launch', `${labelFor(t, name)} joined`
-              + (project === view ? '' : ` in ${projectName(project)}`));
+            if (!firstPoll) note('launch', `${labelFor(t, name)} joined`, null, project);
           }
         }
       }
@@ -934,48 +960,78 @@
      is already spoken for -- a click opens a worker's profile -- and because
      nothing else on this page can be triggered by accident that way. */
 
-  const WHEEL_STEP = 55;    // accumulated delta that counts as one move
-  const SWITCH_REST = 300;  // ms before the next move, so one flick moves one session
+  const DRAG_STEP = 110;    // px sideways, with both buttons down, for one move
+  const WHEEL_STEP = 55;    // accumulated wheel delta that counts as one move
+  const SWITCH_REST = 320;  // ms before the next move, so one flick moves one project
+  const DRAG_PULL = 46;     // px the field follows the hand while the gesture runs
   const EDGE_ZONE = 76;     // px from the edge where the arrows take a click
 
   let bothDown = false;
+  let lastX = 0;            // where the pointer was, to measure the drag from
+  let dragAcc = 0;          // px dragged sideways since the last move
   let wheelAcc = 0;
   let lastSwitch = 0;
   let menuBlocked = 0;      // right-button release after a gesture opens no menu
   let clickBlocked = 0;
 
+  // How far the field is pulled aside right now: the gesture has to show that
+  // it took, before anything moves.
+  let dragPull = 0;
+
   function gesture(dir) {
     const now = performance.now();
     if (now - lastSwitch < SWITCH_REST) return;
     lastSwitch = now;
-    menuBlocked = now + 800;
-    clickBlocked = now + 800;
+    menuBlocked = now + 900;
+    clickBlocked = now + 900;
+    dragAcc = 0;
+    wheelAcc = 0;
+    dragPull = 0;
     stepView(dir);
   }
 
-  addEventListener('mousedown', (e) => {
-    bothDown = (e.buttons & 3) === 3;
-    if (bothDown) { menuBlocked = performance.now() + 800; wheelAcc = 0; }
-  });
+  function holdBoth(on) {
+    if (bothDown === on) return;
+    bothDown = on;
+    dragAcc = 0;
+    wheelAcc = 0;
+    if (!on) dragPull = 0;
+    if (on) menuBlocked = performance.now() + 900;
+  }
 
-  addEventListener('mouseup', (e) => { if ((e.buttons & 3) !== 3) bothDown = false; });
-  addEventListener('blur', () => { bothDown = false; });
+  addEventListener('mousedown', (e) => { lastX = e.clientX; holdBoth((e.buttons & 3) === 3); });
+  addEventListener('mouseup', (e) => { if ((e.buttons & 3) !== 3) holdBoth(false); });
+  addEventListener('blur', () => holdBoth(false));
 
   addEventListener('contextmenu', (e) => {
     if (bothDown || performance.now() < menuBlocked) e.preventDefault();
   });
 
+  // Both buttons down, then move the hand sideways. The wheel below does the
+  // same when the browser sees it, but a mouse driver can keep a wheel event to
+  // itself while two buttons are held, and a plain mouse has no sideways wheel
+  // at all -- movement is the one thing that always arrives.
+  addEventListener('mousemove', (e) => {
+    if (!bothDown) { lastX = e.clientX; return; }
+    // Measured from the last position rather than taken from `movementX`,
+    // which a remote-controlled or scaled pointer can report as zero.
+    const dx = e.clientX - lastX;
+    lastX = e.clientX;
+    if (!dx) return;
+    dragAcc += dx;
+    dragPull = Math.max(-DRAG_PULL, Math.min(DRAG_PULL, dragAcc * 0.45));
+    if (Math.abs(dragAcc) >= DRAG_STEP) gesture(Math.sign(dragAcc));
+  });
+
   addEventListener('wheel', (e) => {
-    if (!bothDown) return;
+    // Sideways scrolling on its own is the trackpad's version of the same
+    // move, and costs nothing to support: nothing on this page scrolls.
+    const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY) * 1.5;
+    if (!bothDown && !sideways) return;
     e.preventDefault();   // the page does not scroll; the fleet does
-    // A mouse only has the vertical wheel, a trackpad has both. Whichever axis
-    // the hand actually moved is the one that counts.
     const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
     wheelAcc += d;
-    if (Math.abs(wheelAcc) >= WHEEL_STEP) {
-      gesture(Math.sign(wheelAcc));
-      wheelAcc = 0;
-    }
+    if (Math.abs(wheelAcc) >= WHEEL_STEP) gesture(Math.sign(wheelAcc));
   }, { passive: false });
 
   addEventListener('keydown', (e) => {
@@ -1022,16 +1078,15 @@
       for (const ev of events.slice(-5)) {
         const kind = ev.kind in KIND ? ev.kind : 'other';
         const d = ev.detail || {};
-        const from = where(ev.terminal_id);
         note(kind,
-          kind === 'launch' ? `${d.agent_name || nameOf(ev.terminal_id)} joined${from}`
-          : kind === 'completion' ? `${nameOf(ev.terminal_id)} finished${from}`
-          : kind === 'error' ? `${nameOf(ev.terminal_id)} failed${from}`
-          : kind === 'waiting' || kind === 'stuck' ? `${labelOf(ev)} ${KIND[kind].verb}${from}`
+          kind === 'launch' ? `${d.agent_name || nameOf(ev.terminal_id)} joined`
+          : kind === 'completion' ? `${nameOf(ev.terminal_id)} finished`
+          : kind === 'error' ? `${nameOf(ev.terminal_id)} failed`
+          : kind === 'waiting' || kind === 'stuck' ? `${labelOf(ev)} ${KIND[kind].verb}`
           : d.event_type === 'terminal_progress' ? `${labelOf(ev)} ${d.percent}%${d.note ? ' — ' + d.note : ''}`
           : kind === 'other' ? `${labelOf(ev)} ${String(d.event_type || 'event').replace(/^terminal_/, '')}`
           : `${senderName(d.sender)} → ${nameOf(d.receiver || ev.terminal_id)}`,
-          ev.timestamp);
+          ev.timestamp, projectOf(ev.terminal_id));
       }
       paintState();
     } catch { /* stream disabled server-side; live events still work */ }
@@ -1059,10 +1114,7 @@
 
   // Which session a line came from -- named only while you are watching a
   // different one. On its own field it would sit on every line and say nothing.
-  const where = (id) => {
-    const n = id && nodes.get(id);
-    return n && n.project !== view ? ` in ${projectName(n.project)}` : '';
-  };
+  const projectOf = (id) => (id && nodes.get(id)?.project) || '';
 
   // Traffic whose sender is not a terminal in the fleet came from outside it --
   // the orchestrator driving the run. That is Claude, not an anonymous agent.
@@ -1117,7 +1169,7 @@
       // The wire shows that something crossed; the ticker is where it says
       // what. CAO strips message bodies from its events, so the kind of
       // dispatch is the most that can honestly be named here.
-      note(kind, `${senderName(d.sender)} → ${nameOf(to)}  ${KIND[kind].verb}${where(to)}`);
+      note(kind, `${senderName(d.sender)} → ${nameOf(to)}  ${KIND[kind].verb}`, null, projectOf(to));
     } else if (kind === 'launch') {
       corePulse = 1;
       pollFleet();
@@ -1125,25 +1177,25 @@
       const n = nodes.get(ev.terminal_id);
       if (n) n.status = 'completed';
       send(ev.terminal_id, null, kind);
-      note(kind, `${nameOf(ev.terminal_id)} finished${where(ev.terminal_id)}`);
+      note(kind, `${nameOf(ev.terminal_id)} finished`, null, projectOf(ev.terminal_id));
     } else if (kind === 'error') {
       const n = nodes.get(ev.terminal_id);
       if (n) n.status = 'error';
       send(ev.terminal_id, null, kind);
-      note(kind, `${nameOf(ev.terminal_id)} failed${where(ev.terminal_id)}`);
+      note(kind, `${nameOf(ev.terminal_id)} failed`, null, projectOf(ev.terminal_id));
       notify(kind, ev);
     } else if (kind === 'waiting' || kind === 'stuck') {
       const n = nodes.get(ev.terminal_id);
       if (n && kind === 'waiting') n.status = 'waiting_user_answer';
       if (n && kind === 'stuck') n.stuck = true;
-      note(kind, `${labelOf(ev)} ${KIND[kind].verb}${where(ev.terminal_id)}`);
+      note(kind, `${labelOf(ev)} ${KIND[kind].verb}`, null, projectOf(ev.terminal_id));
       notify(kind, ev);
     } else if (kind === 'file_mod') {
-      note(kind, `${nameOf(ev.terminal_id)} touched files${where(ev.terminal_id)}`);
+      note(kind, `${nameOf(ev.terminal_id)} touched files`, null, projectOf(ev.terminal_id));
     } else if (d.event_type === 'terminal_progress') {
       const n = nodes.get(ev.terminal_id);
       if (n && typeof d.percent === 'number') n.progress = d.percent;
-      note(kind, `${labelOf(ev)} ${d.percent}%${d.note ? ' — ' + d.note : ''}${where(ev.terminal_id)}`);
+      note(kind, `${labelOf(ev)} ${d.percent}%${d.note ? ' — ' + d.note : ''}`, null, projectOf(ev.terminal_id));
     }
 
     const n = nodes.get(ev.terminal_id);
@@ -1170,7 +1222,15 @@
   const clock = (iso) => (iso ? new Date(iso) : new Date())
     .toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-  function note(kind, text, at) {
+  // "in <project>", present only while the line is about somewhere else.
+  function stampWhere(li) {
+    const what = li.querySelector('.what');
+    const from = li.dataset.project;
+    what.textContent = what.dataset.base
+      + (from && from !== view ? ` in ${projectName(from)}` : '');
+  }
+
+  function note(kind, text, at, project) {
     // The stack is anchored to the bottom corner, so a new row shoves every
     // older one up by its own height. Measure first, then put them back and let
     // them glide -- otherwise the whole column jumps on every event.
@@ -1180,7 +1240,9 @@
     const li = document.createElement('li');
     li.style.setProperty('--tint', (KIND[kind] || KIND.other).color);
     li.innerHTML = `<time>${clock(at)}</time><span class="dot"></span><span class="what"></span>`;
-    li.querySelector('.what').textContent = text;
+    li.dataset.project = project || '';
+    li.querySelector('.what').dataset.base = text;
+    stampWhere(li);
     li.addEventListener('animationend', function settle(e) {
       if (e.animationName === 'enter') li.dataset.settled = '1';
     });
@@ -1362,11 +1424,55 @@
      warms to the signal colour; one with a failure goes red, which is how you
      learn about it without being on that screen. */
 
-  const EDGE_PAD = 30;     // px from the window edge to the nearest arrowhead
-  const EDGE_GAP = 16;     // px between stacked arrowheads
+  const EDGE_PAD = 36;     // px from the window edge to the nearest arrowhead
+  const EDGE_GAP = 26;     // px between stacked arrowheads
   const EDGE_MAX = 4;      // drawn per side; past that the readout's count speaks
-  const EDGE_ARM = 8;      // px each arm falls back from the point
-  const EDGE_SPREAD = 7;   // px each arm rises from the point
+  const EDGE_ARM = 15;     // px each arm falls back from the point
+  const EDGE_SPREAD = 12;  // px each arm rises from the point
+  const EDGE_PER_ARM = 4;  // grains on each arm, besides the point
+
+  // A drifting cloud that happens to be an arrowhead, not an arrowhead drawn in
+  // dots: each grain sits off the line it "should" be on and wanders on its own
+  // slow period, so the head swells, sags and recovers instead of pulsing as
+  // one rigid shape. The offsets are drawn once per project from a seeded
+  // generator -- random enough to look unplanned, fixed enough that the arrow
+  // keeps its own face from frame to frame instead of boiling.
+  const arrowGrains = new Map();
+
+  function grainsFor(project) {
+    const held = arrowGrains.get(project);
+    if (held) return held;
+    let seed = 2166136261;
+    for (let i = 0; i < project.length; i++) {
+      seed ^= project.charCodeAt(i);
+      seed = Math.imul(seed, 16777619) >>> 0;
+    }
+    const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+    // The point is heavier and steadier than the arms: it is what says which
+    // way this is pointing, and a tip that wanders as much as its tail turns
+    // the whole thing into a smudge.
+    const grain = (t, arm) => ({
+      t, arm,
+      r: (t === 0 ? 3.2 : 2.4 - t * 0.9) * (0.86 + rnd() * 0.3),
+      off: (rnd() - 0.5) * (t === 0 ? 1 : 2.2),   // how far off the arm's line it sits
+      slip: (rnd() - 0.5) * 1.8,                  // and how far along, early or late
+      sway: (t === 0 ? 0.5 : 0.8 + rnd() * 1.1),  // how far it wanders across
+      reach: 0.5 + rnd() * 1.1,                   // and along
+      fr: 0.0009 + rnd() * 0.0013,       // its own slow period
+      fr2: 0.0006 + rnd() * 0.0009,      // and a second one, so it never repeats cleanly
+      ph: rnd() * TAU,
+      ph2: rnd() * TAU,
+      a: t === 0 ? 1 : 0.68 + rnd() * 0.3
+    });
+    const grains = [grain(0, 0)];
+    for (const arm of [-1, 1]) {
+      for (let i = 1; i <= EDGE_PER_ARM; i++) {
+        grains.push(grain((i / EDGE_PER_ARM) * (0.9 + rnd() * 0.18), arm));
+      }
+    }
+    arrowGrains.set(project, grains);
+    return grains;
+  }
 
   function edgeTint(project) {
     let worst = 0;
@@ -1378,22 +1484,26 @@
     return worst === 2 ? KIND.error.color : worst === 1 ? C.signal : C.dim;
   }
 
-  function drawArrow(x, y, side, color, k, now) {
-    const wave = reduceMotion ? 0.55 : 0.5 + 0.5 * Math.sin(now * 0.0016 - k * 0.7);
+  function drawArrow(x, y, side, color, k, now, project) {
+    // One breath for the whole head -- it swells and leans out -- under which
+    // every grain runs its own two periods, which is what keeps the outline
+    // from being an arrow stamped in dots.
+    const breath = reduceMotion ? 0.5 : 0.5 + 0.5 * Math.sin(now * 0.0011 - k * 0.8);
+    const swell = 0.84 + breath * 0.3;
+    const lean = side * (breath - 0.5) * 5;
     // Depth: the nearest project is the brightest, the ones behind it recede.
-    const weight = (k === 0 ? 1 : 0.72 - k * 0.14) * (0.66 + wave * 0.34);
-    const lean = side * wave * 2.4;   // the breath moves it, not just its alpha
+    const weight = (k === 0 ? 1 : 0.74 - k * 0.14) * (0.62 + breath * 0.38);
     ctx.fillStyle = color;
-    for (let arm = -1; arm <= 1; arm += 2) {
-      for (let s = 0; s <= 2; s++) {
-        if (s === 0 && arm > 0) continue;   // the point is one grain, not two
-        const t = s / 2;
-        ctx.globalAlpha = Math.min(1, weight * (s === 0 ? 1 : 0.86 - t * 0.16));
-        ctx.beginPath();
-        ctx.arc(x + lean - side * t * EDGE_ARM, y + arm * t * EDGE_SPREAD,
-                s === 0 ? 2.2 : 1.75, 0, TAU);
-        ctx.fill();
-      }
+    for (const g of grainsFor(project)) {
+      const drift = reduceMotion ? 0
+        : Math.sin(now * g.fr + g.ph) * g.sway + Math.sin(now * g.fr2 + g.ph2) * g.sway * 0.45;
+      const creep = reduceMotion ? 0 : Math.sin(now * g.fr2 + g.ph) * g.reach;
+      const along = g.t * EDGE_ARM * swell + g.slip + creep;
+      const across = g.arm * (g.t * EDGE_SPREAD * swell) + g.off + drift * (g.arm || 0.6);
+      ctx.globalAlpha = Math.min(1, weight * g.a);
+      ctx.beginPath();
+      ctx.arc(x + lean - side * along, y + across, g.r * (0.9 + breath * 0.22), 0, TAU);
+      ctx.fill();
     }
     ctx.globalAlpha = 1;
   }
@@ -1403,7 +1513,7 @@
     for (const side of [-1, 1]) {
       aside(side).slice(0, EDGE_MAX).forEach((name, k) => {
         const x = side < 0 ? EDGE_PAD + k * EDGE_GAP : W - EDGE_PAD - k * EDGE_GAP;
-        drawArrow(x, cy, side, edgeTint(name), k, now);
+        drawArrow(x, cy, side, edgeTint(name), k, now, name);
       });
     }
   }
@@ -1428,7 +1538,9 @@
       // The state has no visible word: the glyph, its colour and its motion
       // carry it. The hidden span keeps that meaning available to a screen
       // reader, which cannot see any of those three.
-      el.innerHTML = `<b class="tag__name"></b><span class="tag__title"></span><span class="tag__meter"></span><i class="sr tag__state"></i>`;
+      el.innerHTML = `<b class="tag__name"></b>`
+        + `<span class="tag__under"><span class="tag__title"></span><span class="tag__meter"></span></span>`
+        + `<i class="sr tag__state"></i>`;
       overlay.appendChild(el);
       n.el = el;
       n._name = el.querySelector('.tag__name');
@@ -1460,7 +1572,7 @@
     const dx = ux / ul, dy = uy / ul;
     const w = n.el.offsetWidth, h = n.el.offsetHeight;
     const push = TAG_CLEAR + Math.abs(dx) * (w / 2) + Math.abs(dy) * (h / 2);
-    const x = Math.max(8, Math.min(W - w - 8, n.x + dx * push - w / 2));
+    const x = Math.max(8, Math.min(W - w - 8, n.x + dragPull + dx * push - w / 2));
     const y = Math.max(8, Math.min(H - h - 8, n.y + dy * push - h / 2));
     n.el.style.transform = `translate(${x}px, ${y}px)`;
   }
@@ -1468,6 +1580,14 @@
   function frame(now) {
     ctx.fillStyle = C.field;
     ctx.fillRect(0, 0, W, H);
+
+    // The field springs back when the hand lets go without going far enough.
+    if (!bothDown && dragPull) {
+      dragPull = Math.abs(dragPull) < 0.4 ? 0 : dragPull * 0.84;
+    }
+    placeCore();
+    ctx.save();
+    ctx.translate(dragPull, 0);
 
     const drawing = [];
     for (const n of nodes.values()) {
@@ -1496,9 +1616,12 @@
     }
 
     drawCorePulse();
-    drawEdges(now);
     paintMark(now);
     for (const [n, fade] of drawing) { drawNode(n, now, fade); syncTag(n); }
+    // The arrows are the one thing that does not travel with the field: they
+    // are where you are going, not what you are holding.
+    ctx.restore();
+    drawEdges(now);
 
     requestAnimationFrame(frame);
   }
@@ -1582,7 +1705,7 @@
 
   function nodeAt(x, y) {
     for (const n of onScreen()) {
-      if (Math.hypot(x - n.x, y - n.y) <= NODE_R + 10) return n;
+      if (Math.hypot(x - n.x - dragPull, y - n.y) <= NODE_R + 10) return n;
       const r = n.el && n.el.getBoundingClientRect();
       if (r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return n;
     }
@@ -1640,9 +1763,14 @@
     }
     const known = onScreen().map(percentOf).filter(p => p != null);
     const mean = known.length ? Math.round(known.reduce((a, b) => a + b, 0) / known.length) : null;
-    const html = meterHtml(mean) + (known.length ? ` <span>of ${known.length}</span>` : '');
+    // The mark is the conductor, so resting on it says which project it is
+    // conducting -- and how far that project has got, when its agents report.
+    const html = (view ? `<span class="where">${escapeHtml(projectName(view))}</span>` : '')
+      + (known.length ? `${meterHtml(mean)} <span>of ${known.length}</span>` : 'nothing reported yet');
     if (coreMeter.innerHTML !== html) coreMeter.innerHTML = html;
-    coreMeter.style.transform = `translate(${cx - 60}px, ${cy + 64}px)`;
+    // Positioned with left/top: the transform belongs to the reveal.
+    coreMeter.style.left = `${cx - 120 + dragPull}px`;
+    coreMeter.style.top = `${cy + 64}px`;
     const show = coreHover && onScreen().length ? '1' : '0';
     if (coreMeter.dataset.show !== show) coreMeter.dataset.show = show;
   }
@@ -1685,7 +1813,7 @@
         layout();
         corePulse = 1;
         eventCount++;
-        note('launch', `${bareName(c.session)} joined${where(c.id)}`);
+        note('launch', `${bareName(c.session)} joined`, null, c.project);
         paintState();
       }, 400 + i * 700);
     });
@@ -1702,9 +1830,10 @@
       send(from, to, kind);
       if (fromCore) corePulse = 1;
       note(kind,
-        kind === 'completion' ? `${nameOf(to)} finished${where(to)}`
-        : kind === 'error' ? `${nameOf(to)} failed${where(to)}`
-        : `${nameOf(from)} → ${nameOf(to)}  ${KIND[kind].verb}${where(to)}`);
+        kind === 'completion' ? `${nameOf(to)} finished`
+        : kind === 'error' ? `${nameOf(to)} failed`
+        : `${nameOf(from)} → ${nameOf(to)}  ${KIND[kind].verb}`,
+        null, projectOf(to));
       eventCount++;
       paintState();
     }, 1900);

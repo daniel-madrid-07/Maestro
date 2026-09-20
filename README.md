@@ -37,6 +37,11 @@ Knowing what an agent is doing is the hard part, and Maestro does it the way a p
 - **Isolated git worktrees** — `use_worktree` puts a worker on its own branch in its own checkout, so ten agents on one repository never trample each other; merge with plain git when they are done, and nothing uncommitted is ever thrown away
 - **Live panel** — the fleet as a ring of agents around the conductor, wires that light up when a message crosses, a ticker of what just happened, and the state of every agent in its glyph. Installs as a desktop app (PWA); works offline
 - **One project at a time** — running two projects at once no longer piles every agent onto a single ring. Each working directory gets the field to itself; drag the field sideways like a slider (or scroll sideways, or press the arrow keys) and the next project's page slides in. The projects you are not watching wait at the edges as breathing arrowheads, one each, warming to orange when a worker there needs an answer and to red when one has failed
+
+  <img src="docs/projects.gif" alt="Dragging the field sideways slides the whole page out and the next project's page in; the arrowheads at the edges are the other projects" width="100%">
+
+  <sub>Demo mode (`?demo`), three projects: drag to the next one and back, then the two hovers.</sub>
+
 - **It tells you when it needs you** — system notifications when an agent asks a question, dies, or freezes for ten minutes with nothing changing on screen
 - **Progress you can trust** — agents report their own percentage (`report_progress`); hover a worker to read it, hover the mark for the fleet's mean. No report, no invented number
 

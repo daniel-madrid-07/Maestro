@@ -36,7 +36,7 @@ Knowing what an agent is doing is the hard part, and Maestro does it the way a p
 - **Unstick a worker without touching the keyboard** — `answer_prompt` answers the question it is blocked on, `interrupt` stops a turn that is going in circles, `restart_terminal` gives it a fresh Claude with the same id, directory and queue
 - **Isolated git worktrees** — `use_worktree` puts a worker on its own branch in its own checkout, so ten agents on one repository never trample each other; merge with plain git when they are done, and nothing uncommitted is ever thrown away
 - **Live panel** — the fleet as a ring of agents around the conductor, wires that light up when a message crosses, a ticker of what just happened, and the state of every agent in its glyph. Installs as a desktop app (PWA); works offline
-- **One project at a time** — running two projects at once no longer piles every agent onto a single ring. Each working directory gets the field to itself; hold both mouse buttons and drag sideways (or scroll sideways, or press the arrow keys) to move between them. The projects you are not watching wait at the edges as breathing arrowheads, one each, warming to orange when a worker there needs an answer and to red when one has failed
+- **One project at a time** — running two projects at once no longer piles every agent onto a single ring. Each working directory gets the field to itself; drag the field sideways like a slider (or scroll sideways, or press the arrow keys) and the next project's page slides in. The projects you are not watching wait at the edges as breathing arrowheads, one each, warming to orange when a worker there needs an answer and to red when one has failed
 - **It tells you when it needs you** — system notifications when an agent asks a question, dies, or freezes for ten minutes with nothing changing on screen
 - **Progress you can trust** — agents report their own percentage (`report_progress`); hover a worker to read it, hover the mark for the fleet's mean. No report, no invented number
 
@@ -44,6 +44,7 @@ Knowing what an agent is doing is the hard part, and Maestro does it the way a p
 
 - **Survives a restart** — on Linux and macOS the server re-adopts the tmux sessions that are still alive; everywhere it keeps a note of worktrees whose agent is gone so their work can still be merged
 - **Agents that can reach further** — `maestro mcp import` shares the MCP servers from your own Claude Code with every agent, so a worker can drive a browser or read an issue instead of only editing files. They run with `--strict-mcp-config`, so they get exactly what you share and nothing else
+- **Stays out of your way** — agents run below normal CPU priority, so a fleet at full tilt never takes your editor with it; starts are staggered; the fleet lives on a tmux server of its own, out of reach of a stray `tmux kill-server`
 - **Small enough to read** — under 4,000 lines of Python, two dependencies (four on Windows), no database, no web framework
 
 ## Installation / Usage

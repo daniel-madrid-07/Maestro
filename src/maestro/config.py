@@ -21,6 +21,9 @@ DEFAULTS = {
     "extra_path": [],
     "backend": "auto",
     "shared_mcp": "",
+    "tmux_socket": "maestro",
+    "max_starting": 4,
+    "nice": 10,
 }
 
 # key -> (environment variable, type). extra_path takes os.pathsep-separated dirs.
@@ -35,6 +38,9 @@ ENV = {
     "extra_path": ("MAESTRO_EXTRA_PATH", list),
     "backend": ("MAESTRO_BACKEND", str),
     "shared_mcp": ("MAESTRO_SHARED_MCP", str),
+    "tmux_socket": ("MAESTRO_TMUX_SOCKET", str),
+    "max_starting": ("MAESTRO_MAX_STARTING", int),
+    "nice": ("MAESTRO_NICE", int),
 }
 
 CONFIG_TEMPLATE = """\
@@ -74,6 +80,24 @@ backend = "auto"
 # configuration; agents run with --strict-mcp-config, so what is not in here or
 # in the profile does not exist for them.
 shared_mcp = ""
+
+# The tmux server the sessions live in (`tmux -L <name>`): one of Maestro's
+# own, so a `tmux kill-server` typed by you, an agent or another tool on the
+# default server cannot take the whole fleet with it. Attach to a session with
+# `tmux -L maestro attach -t mx-<name>`.
+tmux_socket = "maestro"
+
+# How many sessions may be starting Claude at the same time. There is no
+# ceiling on how many run; this only staggers the launches, because twenty
+# Claudes booting at once is what stalls the machine and every screen read.
+max_starting = 4
+
+# CPU priority of the agents, and of everything they run (builds, tests, the
+# app under test): 0 is normal, 19 is lowest. The model runs elsewhere; what
+# eats this machine is the tools a worker runs on it, and twenty workers are
+# twenty developers on one PC. Below normal, your editor and desktop always win.
+# On Windows any value above 0 means "below normal".
+nice = 10
 """
 
 
@@ -167,6 +191,15 @@ EXTRA_PATH = list(_values["extra_path"])
 # Servers shared with every agent. A path in config wins; otherwise the file in
 # MAESTRO_HOME is used when it is there, so `maestro mcp import` is enough.
 SHARED_MCP = Path(_values["shared_mcp"]).expanduser() if _values["shared_mcp"] else HOME / "mcp.json"
+
+# The fleet's own tmux server (see the template above); "" means the default one.
+TMUX_SOCKET = _values["tmux_socket"]
+
+# Simultaneous Claude start-ups allowed; the rest queue. Never a cap on the fleet.
+MAX_STARTING = max(1, int(_values["max_starting"]))
+
+# CPU priority for agents (see the template): 0 normal, up to 19.
+NICE = max(0, min(19, int(_values["nice"])))
 
 # tmux keeps sessions alive across a server restart and exists wherever a POSIX
 # system is; Windows has no tmux, so there each session gets a ConPTY of its own.

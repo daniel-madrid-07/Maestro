@@ -10,7 +10,21 @@ import subprocess
 import time
 import uuid
 
+from maestro import config
+
 SHELLS = {"bash", "zsh", "sh", "fish", "dash"}
+
+
+def _tmux(*args: str) -> list[str]:
+    """The tmux command line, on Maestro's own server when one is configured.
+
+    A server of its own is what keeps the fleet out of reach of a plain
+    `tmux kill-server`: whoever runs it -- the owner tidying up, an agent with
+    permissions off, another orchestrator -- kills the default server, and
+    nothing of Maestro's lives there.
+    """
+    base = ["tmux", "-L", config.TMUX_SOCKET] if config.TMUX_SOCKET else ["tmux"]
+    return [*base, *args]
 
 
 class TmuxError(RuntimeError):
@@ -33,7 +47,7 @@ UNSET_CLAUDE_ENV = (
 
 def _run(*args: str, input: bytes | None = None, check: bool = True) -> str:
     proc = subprocess.run(
-        ["tmux", *args], input=input, capture_output=True, timeout=20
+        _tmux(*args), input=input, capture_output=True, timeout=20
     )
     if check and proc.returncode != 0:
         raise TmuxError(
@@ -44,13 +58,13 @@ def _run(*args: str, input: bytes | None = None, check: bool = True) -> str:
 
 def has_session(name: str) -> bool:
     return subprocess.run(
-        ["tmux", "has-session", "-t", f"={name}"], capture_output=True
+        _tmux("has-session", "-t", f"={name}"), capture_output=True
     ).returncode == 0
 
 
 def list_sessions() -> list[str]:
     out = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True
+        _tmux("list-sessions", "-F", "#{session_name}"), capture_output=True, text=True
     )
     if out.returncode != 0:
         return []  # no server running
@@ -87,7 +101,7 @@ def new_window(session: str, window: str, cwd: str, env: dict[str, str]) -> str:
 
 def pane_alive(pane: str) -> bool:
     return subprocess.run(
-        ["tmux", "display-message", "-p", "-t", pane, "#{pane_id}"], capture_output=True
+        _tmux("display-message", "-p", "-t", pane, "#{pane_id}"), capture_output=True
     ).returncode == 0
 
 
@@ -158,6 +172,21 @@ def quote(parts: list[str]) -> str:
     return shlex.join(parts)
 
 
+def stray_sessions(prefix: str) -> list[str]:
+    """Maestro-named sessions on the *default* tmux server: left there by a
+    Maestro that predates the dedicated socket. They are not adopted (their
+    windows would need a different server on every call); they are named so
+    the owner can attach to them or end them."""
+    if not config.TMUX_SOCKET:
+        return []
+    out = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True
+    )
+    if out.returncode != 0:
+        return []
+    return [ln for ln in out.stdout.splitlines() if ln.startswith(prefix)]
+
+
 def launch(pane: str, argv: list[str], shell_wait: float = 15.0) -> None:
     """Start ``argv`` in the pane: wait for its shell, then type the command.
 
@@ -168,7 +197,10 @@ def launch(pane: str, argv: list[str], shell_wait: float = 15.0) -> None:
     deadline = time.time() + shell_wait
     while time.time() < deadline and pane_command(pane) not in SHELLS:
         time.sleep(0.3)
-    send_line(pane, UNSET_CLAUDE_ENV + quote(argv))
+    # Below normal priority for Claude and every tool it runs, so a fleet at
+    # full tilt never takes the owner's editor with it.
+    lower = f"nice -n {config.NICE} " if config.NICE else ""
+    send_line(pane, UNSET_CLAUDE_ENV + lower + quote(argv))
 
 
 def agent_exited(pane: str) -> bool:

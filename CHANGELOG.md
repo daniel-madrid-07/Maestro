@@ -17,6 +17,24 @@
   or sessions you name.
 - **`get_usage`**: how much of the subscription's five-hour and weekly windows
   is left, for deciding how large a fleet to open.
+- **A fleet that survives other people's tidying.** Sessions now live on a
+  tmux server of Maestro's own (`tmux -L maestro`), so a `tmux kill-server`
+  from the owner, an agent or another orchestrator on the default server
+  cannot take the whole fleet with it. A fleet started by an older Maestro on
+  the default server is kept there for that run; the move happens once the
+  fleet is empty. A terminal whose window disappears anyway is kept as an
+  `error` with the reason, instead of being deleted with its inbox and its
+  worktree record: `restart_terminal` brings it back with all three.
+- **Staggered starts, no ceiling.** At most `max_starting` (4) sessions boot
+  Claude at the same time; the rest queue. Two orchestrators launching twenty
+  workers at once is what stalled every screen read for everyone.
+- **Agents run below normal CPU priority** (`nice`, 10 by default), and so
+  does everything they run: the model is elsewhere, but a worker's greps,
+  builds, tests and the app it launches are on this machine, and a fleet of
+  them must not take the owner's editor along.
+- The profiles forbid an agent to stop, restart or reconfigure Maestro, tmux
+  or WSL, or to kill processes it did not start, and ask it to close what it
+  launched to test.
 - **Shared MCP servers.** Agents run with `--strict-mcp-config` and used to
   get only Maestro's own bridge, so a worker could edit files and nothing
   else. `maestro mcp import` copies the servers from your own Claude Code into
@@ -31,10 +49,11 @@
   every agent on the same ring, which read as one fleet -- and a fleet is
   normally many sessions on one repository, so the split that matters is the
   working directory, not the session name. Each project is its own view now:
-  hold both mouse buttons and drag sideways to move between them, or scroll
+  drag the field sideways with the left button, like a slider, or scroll
   sideways, or press the arrow keys, or click the arrows at the edge (a
-  focusable pair of buttons does the same). The projects you are not watching
-  wait at the edges as one arrowhead each, drawn from the same grains the
+  focusable pair of buttons does the same). The whole page moves -- ring,
+  wires and mark -- and the next project's page slides in behind it, already
+  laid out. The projects you are not watching wait at the edges as one arrowhead each, drawn from the same grains the
   wires carry, each grain wandering on its own period so the head swells and
   sags instead of pulsing as a rigid shape. An arrow warms to the signal
   colour when a worker there is waiting on an answer and goes red when one has

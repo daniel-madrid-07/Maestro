@@ -61,12 +61,24 @@ are the machine and the user's plan; delete finished sessions as you go.
 
 ## 3. Drive to completion
 
-**Wait, do not poll.** `wait_for(...)` blocks until a worker finishes, asks a
-question, or dies, and returns the moment one does (`timeout_seconds`, up to
-900; `require_all=true` waits for the slowest instead of the first). The loop
-is: `wait_for` → act on what came back → `wait_for` again. Asking
-`get_terminal_status` every few seconds costs a call and a turn each time and
-tells you nothing in between.
+**Wait in the background, not in the chat.** A tool call holds the
+conversation until it returns, so a long wait leaves the user unable to talk
+to you. Where your harness has a background watch (Claude Code's `Monitor`),
+arm it on Maestro's event stream and end your turn; each event comes back as a
+notification and the user keeps the chat:
+
+```
+curl -sN http://127.0.0.1:9889/events | grep --line-buffered -E '"kind": "(completion|error|waiting|stuck)"'
+```
+
+Without one, `wait_for(...)` blocks until a worker finishes, asks a question
+or dies (`timeout_seconds` up to 900; `require_all=true` for the slowest
+instead of the first); keep the timeout short when someone is at the keyboard.
+Either way: never poll `get_terminal_status` in a loop.
+
+**Never restart what the fleet lives on.** No `maestro down`, no server
+restart, no `tmux kill-server`, no `wsl --shutdown`, unless the user asks in so
+many words: another conversation may have a fleet on the same Maestro.
 
 - `fleet_status()`: everything at once, and `needs_attention` for who wants you.
 - `broadcast_message(message, ...)`: one message to the whole fleet, or to the

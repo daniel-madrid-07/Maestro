@@ -23,6 +23,8 @@ import time
 import pyte
 from winpty import PtyProcess
 
+from maestro import config
+
 COLS, ROWS = 220, 50
 HISTORY = 3000  # lines kept above the screen, for scrollback reads
 
@@ -51,6 +53,24 @@ KEYS = {
 }
 
 
+def _lower_priority(pid: int) -> None:
+    """Below-normal CPU priority for the agent; its children inherit it.
+
+    The model runs elsewhere; what loads this machine is the tools a worker
+    runs on it, and a fleet of them must not take the owner's desktop along.
+    """
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x0200, False, pid)  # PROCESS_SET_INFORMATION
+    if not handle:
+        return
+    try:
+        kernel32.SetPriorityClass(handle, 0x4000)  # BELOW_NORMAL_PRIORITY_CLASS
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 class _Terminal:
     def __init__(self, session: str, window: str, cwd: str, env: dict[str, str]):
         self.session = session
@@ -68,6 +88,8 @@ class _Terminal:
         exe = shutil.which(argv[0], path=self.env.get("PATH")) or argv[0]
         self.proc = PtyProcess.spawn([exe, *argv[1:]], cwd=self.cwd, env=self.env,
                                      dimensions=(ROWS, COLS))
+        if config.NICE:
+            _lower_priority(self.proc.pid)
         threading.Thread(target=self._pump, name=f"conpty-{self.window}", daemon=True).start()
 
     def _pump(self) -> None:
@@ -241,3 +263,7 @@ def send_text(handle: str, text: str, submit_delay: float) -> None:
 
 def quote(parts: list[str]) -> str:
     return " ".join(parts)
+
+
+def stray_sessions(prefix: str) -> list[str]:
+    return []  # nothing outlives the server here, so nothing can be stranded

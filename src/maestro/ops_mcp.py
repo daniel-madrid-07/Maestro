@@ -75,7 +75,7 @@ def launch_session(
                 "initial_message": initial_message, "sender_id": "maestro-ops",
                 "orchestration_type": "launch", "wait": True, "use_worktree": use_worktree,
             },
-            timeout=config.INIT_TIMEOUT + 45,
+            timeout=config.INIT_TIMEOUT * 4 + 45,
         )
     except ApiError as exc:
         return {"success": False, "message": f"Launch session failed: {exc.detail}", "session_name": session_name, "terminal_id": None}
@@ -269,10 +269,14 @@ def fleet_status() -> dict[str, Any]:
 def wait_for(
     terminal_ids: list[str] | None = None,
     states: list[str] | None = None,
-    timeout_seconds: float = 300,
+    timeout_seconds: float = 120,
     require_all: bool = False,
 ) -> dict[str, Any]:
     """Block until a terminal finishes, asks something or dies -- instead of polling.
+
+    This holds your conversation until it returns. From Claude Code, prefer a
+    background watch on ``GET /events`` (see the maestro skill) so the user can
+    keep talking to you; use this for scripts, or with a short timeout.
 
     Returns as soon as one watched terminal reaches one of ``states``
     (default: completed, waiting_user_answer, error -- ``stuck`` is also
@@ -316,7 +320,7 @@ def launch_sessions(sessions: list[dict[str, Any]], max_parallel: int = 4) -> di
     try:
         res = request("POST", "/sessions/batch",
                       body={"sessions": sessions, "max_parallel": max_parallel},
-                      timeout=config.INIT_TIMEOUT * 2 + 120)
+                      timeout=config.INIT_TIMEOUT * 6 + 120)
     except ApiError as exc:
         return _fail("Launch sessions", exc)
     results = res["results"]

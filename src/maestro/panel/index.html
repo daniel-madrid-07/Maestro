@@ -171,10 +171,7 @@
     .tag__title, .tag__meter { transform: none; transition: opacity var(--dur-fast) linear; }
   }
 
-  /* One session at a time. The ring being left behind dissolves where it
-     stands while the one arriving glides in from the side you scrolled. */
   .tag { transition: opacity var(--dur-base) var(--ease-out); }
-  .tag[data-going="1"] { opacity: 0; }
 
   /* Where you are and how far it has got, under the mark, while the cursor
      rests on it. */
@@ -228,6 +225,11 @@
 
   #core-mark svg { display: block; width: 100%; height: 100%; }
 
+  /* The mark of the page sliding out: a still copy, so both pages have one
+     while they cross. */
+  #core-ghost { position: absolute; top: 0; left: 0; width: 112px; height: 112px; }
+  #core-ghost svg { display: block; width: 100%; height: 100%; }
+
   /* Out of touch with the server the mark goes cold; answering, it breathes,
      so the state of the whole system is legible from across the room. */
   #core[data-live="0"] #core-mark {
@@ -255,8 +257,7 @@
   /* Which session of how many, next to its name. */
   #readout .count { color: color-mix(in oklch, var(--dim) 70%, transparent); }
 
-  /* The same move the two-button scroll makes, for a keyboard and for a screen
-     reader. Out of the way until tabbed to, then a plain pair of chips. */
+  /* The same move the drag makes, for a keyboard and for a screen reader. Out of the way until tabbed to, then a plain pair of chips. */
   #viewnav {
     position: fixed;
     top: var(--sp-4);
@@ -406,6 +407,7 @@
     <div id="core" data-live="0">
       <div id="core-mark" aria-hidden="true"></div>
     </div>
+    <div id="core-ghost" aria-hidden="true" hidden></div>
   </div>
 
   <p id="empty" data-show="0">
@@ -511,7 +513,25 @@
   let projects = [];     // working directories, in the order they first appeared
   let view = null;       // the one on screen
   const VIEW_KEY = 'maestro.view';
-  const VIEW_FADE = 220; // ms the ring being left behind takes to dissolve
+  const SLIDE_MS = 460;  // one page slides out while the next slides in
+
+  // The page transition: the whole field -- ring, wires, mark -- moves aside
+  // and the next project's field comes in from the other side, already laid
+  // out. `slideFrom` is the project on its way out; `slide` runs 0 → -dir*W.
+  let slideFrom = null;
+  let slideDir = 0;
+  let slideStart = 0;
+  let slide = 0;
+  const coreGhost = document.getElementById('core-ghost');
+
+  // Where a node's field sits right now: the outgoing page rides `slide`, the
+  // incoming one arrives one screen behind it, everything else is off stage.
+  function pageOffset(project) {
+    if (!slideFrom) return 0;
+    if (project === view) return slide + slideDir * W;
+    if (project === slideFrom) return slide;
+    return 0;
+  }
 
   const onScreen = () => [...nodes.values()].filter(n => n.project === view);
 
@@ -713,7 +733,10 @@
   // The mark travels with the field while a gesture pulls it aside, so the
   // wires stay anchored to it.
   function placeCore() {
-    core.style.transform = `translate(${cx - coreHalf + dragPull}px, ${cy - coreHalf}px)`;
+    core.style.transform = `translate(${cx - coreHalf + dragPull + pageOffset(view)}px, ${cy - coreHalf}px)`;
+    if (slideFrom) {
+      coreGhost.style.transform = `translate(${cx - coreHalf + dragPull + pageOffset(slideFrom)}px, ${cy - coreHalf}px)`;
+    }
   }
   addEventListener('resize', resize);
 
@@ -794,18 +817,37 @@
   function setView(name, dir) {
     if (!name || name === view) return;
     const now = performance.now();
-    for (const n of nodes.values()) if (n.project === view) n.leftAt = now;
+    const leaving = view;
     view = name;
     try { localStorage.setItem(VIEW_KEY, name); } catch { /* nothing to keep */ }
     layout();
     for (const li of ticker.children) stampWhere(li);
-    for (const n of onScreen()) {
-      n.shownAt = now;
-      n.x = reduceMotion || !dir ? n.tx : n.tx + dir * W * 0.32;
-      n.y = n.ty;
+    // The incoming page is complete from its first frame: its ring in place,
+    // its wires, its mark. Nothing glides into position afterwards.
+    for (const n of onScreen()) { n.x = n.tx; n.y = n.ty; n.shownAt = now - 600; }
+    if (leaving && dir && !reduceMotion) {
+      slideFrom = leaving;
+      slideDir = dir;
+      slideStart = now;
+      slide = 0;
+      // The outgoing page keeps a still copy of the mark as it goes.
+      coreGhost.innerHTML = `<svg viewBox="0 0 100 100" fill="${C.signal}"><path d="${markPath.getAttribute('d')}"/></svg>`;
+      coreGhost.hidden = false;
+    } else {
+      finishSlide();
     }
     paintCoreMeter();
     paintState();
+  }
+
+  function finishSlide() {
+    for (const n of nodes.values()) {
+      if (n.project !== view && n.el) { n.el.remove(); n.el = null; }
+    }
+    slideFrom = null;
+    slideDir = 0;
+    slide = 0;
+    coreGhost.hidden = true;
   }
 
   const stepView = (dir) => {
@@ -838,7 +880,6 @@
       stuck: !!t.stuck,   // processing, but the screen has not moved for minutes
       born: performance.now(),
       shownAt: performance.now(),  // when it last entered the view (it fades in)
-      leftAt: 0,                   // when it last left it (it fades out)
       activity: 0,
       surge: 0,           // 1 right after traffic crossed, decaying to rest
       surgeKind: null,    // what crossed, which is what colours the dust
@@ -965,22 +1006,24 @@
   }
 
   /* ---------- moving between projects -------------------------------------
-     Both buttons down and a sideways scroll. Two buttons because one of them
-     is already spoken for -- a click opens a worker's profile -- and because
-     nothing else on this page can be triggered by accident that way. */
+     Drag the field sideways with the left button, like a slider: it follows the
+     hand, and past a short distance the next project slides in. A click that
+     does not move stays a click (it opens a worker's profile), and a drag that
+     starts on a worker is a click on that worker, not a drag. */
 
-  const DRAG_STEP = 110;    // px sideways, with both buttons down, for one move
+  const DRAG_STEP = 110;    // px of drag for one move
+  const DRAG_DEAD = 6;      // px before a press counts as a drag rather than a click
   const WHEEL_STEP = 55;    // accumulated wheel delta that counts as one move
   const SWITCH_REST = 320;  // ms before the next move, so one flick moves one project
   const DRAG_PULL = 46;     // px the field follows the hand while the gesture runs
   const EDGE_ZONE = 76;     // px from the edge where the arrows take a click
 
-  let bothDown = false;
+  let dragging = false;     // left button down on empty field
+  let dragMoved = false;    // and it has travelled past the dead zone
   let lastX = 0;            // where the pointer was, to measure the drag from
   let dragAcc = 0;          // px dragged sideways since the last move
   let wheelAcc = 0;
   let lastSwitch = 0;
-  let menuBlocked = 0;      // right-button release after a gesture opens no menu
   let clickBlocked = 0;
 
   // How far the field is pulled aside right now: the gesture has to show that
@@ -991,43 +1034,45 @@
     const now = performance.now();
     if (now - lastSwitch < SWITCH_REST) return;
     lastSwitch = now;
-    menuBlocked = now + 900;
-    clickBlocked = now + 900;
+    clickBlocked = now + 600;
     dragAcc = 0;
     wheelAcc = 0;
     dragPull = 0;
     stepView(dir);
   }
 
-  function holdBoth(on) {
-    if (bothDown === on) return;
-    bothDown = on;
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    // The release that ends a drag is not a request to open anything.
+    if (dragMoved) clickBlocked = performance.now() + 300;
+    dragMoved = false;
     dragAcc = 0;
-    wheelAcc = 0;
-    if (!on) dragPull = 0;
-    if (on) menuBlocked = performance.now() + 900;
+    canvas.style.cursor = '';
   }
 
-  addEventListener('mousedown', (e) => { lastX = e.clientX; holdBoth((e.buttons & 3) === 3); });
-  addEventListener('mouseup', (e) => { if ((e.buttons & 3) !== 3) holdBoth(false); });
-  addEventListener('blur', () => holdBoth(false));
-
-  addEventListener('contextmenu', (e) => {
-    if (bothDown || performance.now() < menuBlocked) e.preventDefault();
+  addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || projects.length < 2) return;
+    if (nodeAt(e.clientX, e.clientY)) return;   // that press is for the worker
+    dragging = true;
+    dragMoved = false;
+    dragAcc = 0;
+    lastX = e.clientX;
   });
+  addEventListener('mouseup', endDrag);
+  addEventListener('blur', endDrag);
 
-  // Both buttons down, then move the hand sideways. The wheel below does the
-  // same when the browser sees it, but a mouse driver can keep a wheel event to
-  // itself while two buttons are held, and a plain mouse has no sideways wheel
-  // at all -- movement is the one thing that always arrives.
   addEventListener('mousemove', (e) => {
-    if (!bothDown) { lastX = e.clientX; return; }
+    if (!dragging) return;
     // Measured from the last position rather than taken from `movementX`,
     // which a remote-controlled or scaled pointer can report as zero.
     const dx = e.clientX - lastX;
     lastX = e.clientX;
     if (!dx) return;
     dragAcc += dx;
+    if (!dragMoved && Math.abs(dragAcc) < DRAG_DEAD) return;
+    if (!dragMoved) { dragMoved = true; canvas.style.cursor = 'grabbing'; }
+    e.preventDefault();   // no text selection while the field is being dragged
     dragPull = Math.max(-DRAG_PULL, Math.min(DRAG_PULL, dragAcc * 0.45));
     if (Math.abs(dragAcc) >= DRAG_STEP) gesture(Math.sign(dragAcc));
   });
@@ -1036,10 +1081,9 @@
     // Sideways scrolling on its own is the trackpad's version of the same
     // move, and costs nothing to support: nothing on this page scrolls.
     const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY) * 1.5;
-    if (!bothDown && !sideways) return;
+    if (!sideways) return;
     e.preventDefault();   // the page does not scroll; the fleet does
-    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-    wheelAcc += d;
+    wheelAcc += e.deltaX;
     if (Math.abs(wheelAcc) >= WHEEL_STEP) gesture(Math.sign(wheelAcc));
   }, { passive: false });
 
@@ -1540,7 +1584,7 @@
     ctx.globalAlpha = 1;
   }
 
-  function syncTag(n) {
+  function syncTag(n, off = 0) {
     if (!n.el) {
       const el = document.createElement('div');
       el.className = 'tag';
@@ -1585,7 +1629,8 @@
     if (n.el.dataset.above !== above) n.el.dataset.above = above;
     const w = n.el.offsetWidth, h = n.el.offsetHeight;
     const push = TAG_CLEAR + Math.abs(dx) * (w / 2) + Math.abs(dy) * (h / 2);
-    const x = Math.max(8, Math.min(W - w - 8, n.x + dragPull + dx * push - w / 2));
+    // Kept inside its own page, which may itself be partly off screen.
+    const x = Math.max(off + 8, Math.min(off + W - w - 8, n.x + off + dx * push - w / 2));
     const y = Math.max(8, Math.min(H - h - 8, n.y + dy * push - h / 2));
     n.el.style.transform = `translate(${x}px, ${y}px)`;
   }
@@ -1595,45 +1640,47 @@
     ctx.fillRect(0, 0, W, H);
 
     // The field springs back when the hand lets go without going far enough.
-    if (!bothDown && dragPull) {
+    if (!dragging && dragPull) {
       dragPull = Math.abs(dragPull) < 0.4 ? 0 : dragPull * 0.84;
     }
+    // The page transition: ease the outgoing field out, and the incoming one
+    // in behind it, over SLIDE_MS.
+    if (slideFrom) {
+      const t = Math.min(1, (now - slideStart) / SLIDE_MS);
+      slide = -slideDir * W * (1 - Math.pow(1 - t, 3));
+      if (t >= 1) finishSlide();
+    }
     placeCore();
-    ctx.save();
-    ctx.translate(dragPull, 0);
 
-    const drawing = [];
-    for (const n of nodes.values()) {
-      // A project that is no longer on screen dissolves where it stands, then
-      // stops costing anything: no easing, no tag, no particles.
-      const here = n.project === view;
-      const fade = here ? 1 : 1 - Math.min(1, (now - n.leftAt) / VIEW_FADE);
-      if (fade <= 0) {
-        if (n.el) { n.el.remove(); n.el = null; }
-        continue;
+    // Each page is drawn whole under its own offset, so ring, wires and mark
+    // move as one thing. Nodes of any other project are not drawn at all.
+    const pages = slideFrom ? [slideFrom, view] : [view];
+    for (const page of pages) {
+      const off = dragPull + pageOffset(page);
+      ctx.save();
+      ctx.translate(off, 0);
+      const drawing = [];
+      for (const n of nodes.values()) {
+        if (n.project !== page) continue;
+        drawing.push(n);
+        // Ease into position so a re-layout after a launch glides instead of
+        // teleporting.
+        n.x += (n.tx - n.x) * 0.06;
+        n.y += (n.ty - n.y) * 0.06;
+        n.activity *= 0.975;
+        // Held at full through SURGE_HOLD, then ~1.2s coasting back to rest.
+        if (now < n.surgeUntil) n.surge = 1;
+        else n.surge *= 0.955;
+        const sp = span(anchorOf(n.parent, n.project), { x: n.x, y: n.y, r: NODE_R });
+        drawLink(sp.ax, sp.ay, sp.bx, sp.by, n, now, 1);
       }
-      if (n.el) n.el.dataset.going = here ? '0' : '1';
-      drawing.push([n, fade]);
-
-      // Ease into position so a re-layout after a launch glides instead of
-      // teleporting.
-      n.x += (n.tx - n.x) * 0.06;
-      n.y += (n.ty - n.y) * 0.06;
-      n.activity *= 0.975;
-      // Held at full through SURGE_HOLD, then ~1.2s coasting back to rest.
-      if (now < n.surgeUntil) n.surge = 1;
-      else n.surge *= 0.955;
-
-      const s = span(anchorOf(n.parent, n.project), { x: n.x, y: n.y, r: NODE_R });
-      drawLink(s.ax, s.ay, s.bx, s.by, n, now, fade);
+      if (page === view) { drawCorePulse(); paintMark(now); }
+      for (const n of drawing) { drawNode(n, now, 1); syncTag(n, off); }
+      ctx.restore();
     }
 
-    drawCorePulse();
-    paintMark(now);
-    for (const [n, fade] of drawing) { drawNode(n, now, fade); syncTag(n); }
     // The arrows are the one thing that does not travel with the field: they
     // are where you are going, not what you are holding.
-    ctx.restore();
     drawEdges(now);
 
     requestAnimationFrame(frame);
@@ -1718,7 +1765,7 @@
 
   function nodeAt(x, y) {
     for (const n of onScreen()) {
-      if (Math.hypot(x - n.x - dragPull, y - n.y) <= NODE_R + 10) return n;
+      if (Math.hypot(x - n.x - dragPull - pageOffset(n.project), y - n.y) <= NODE_R + 10) return n;
       const r = n.el && n.el.getBoundingClientRect();
       if (r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return n;
     }
@@ -1733,8 +1780,8 @@
 
   addEventListener('click', (e) => {
     askToNotify();   // browsers only grant the prompt inside a user gesture
-    // The click that ends a two-button scroll is part of the gesture, not a
-    // request to open anything.
+    // The release that ends a drag is part of the gesture, not a request to
+    // open anything.
     if (performance.now() < clickBlocked) return;
     const hit = nodeAt(e.clientX, e.clientY);
     if (!hit) {
@@ -1782,7 +1829,7 @@
       + (known.length ? `${meterHtml(mean)} <span>of ${known.length}</span>` : 'nothing reported yet');
     if (coreMeter.innerHTML !== html) coreMeter.innerHTML = html;
     // Positioned with left/top: the transform belongs to the reveal.
-    coreMeter.style.left = `${cx - 120 + dragPull}px`;
+    coreMeter.style.left = `${cx - 120 + dragPull + pageOffset(view)}px`;
     coreMeter.style.top = `${cy + 64}px`;
     const show = coreHover && onScreen().length ? '1' : '0';
     if (coreMeter.dataset.show !== show) coreMeter.dataset.show = show;

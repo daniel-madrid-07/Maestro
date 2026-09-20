@@ -62,6 +62,10 @@ class InitError(RuntimeError):
     pass
 
 
+# What a terminal is marked with when its window disappeared under it.
+HOST_DIED = "terminal window disappeared (tmux server killed, or the window closed by hand); restart_terminal brings it back"
+
+
 class NotReady(RuntimeError):
     pass
 
@@ -143,6 +147,7 @@ class Session:
 class Fleet:
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._starting = threading.BoundedSemaphore(config.MAX_STARTING)
         self.sessions: dict[str, Session] = {}
         self.terminals: dict[str, Terminal] = {}
         # Worktrees whose terminal died with a previous server; never removed
@@ -172,6 +177,19 @@ class Fleet:
         except (OSError, json.JSONDecodeError):
             return
         live = set(console.list_sessions())
+        # A fleet started by a Maestro that predates the dedicated tmux server
+        # lives on the default one. Rather than lose it, this run stays on the
+        # default server; the move happens the next time the fleet is empty.
+        wanted = {Session(**s).tmux for s in data.get("sessions", [])}
+        if wanted and not (wanted & live) and config.TMUX_SOCKET:
+            stray = set(console.stray_sessions(config.SESSION_PREFIX))
+            if wanted & stray:
+                log.warning(
+                    "the running fleet is on the default tmux server; staying there for this run "
+                    "(Maestro moves to its own server, -L %s, once the fleet is empty)", config.TMUX_SOCKET,
+                )
+                config.TMUX_SOCKET = ""
+                live = set(console.list_sessions())
         self.orphans = [o for o in data.get("orphans", []) if os.path.isdir(o.get("path", ""))]
         for s in data.get("sessions", []):
             session = Session(**s)
@@ -188,6 +206,13 @@ class Fleet:
                 self.orphans.append({"terminal_id": term.id, "session_name": term.session, "agent_profile": term.agent_profile, **wt})
                 log.warning("terminal %s is gone; its worktree %s is kept as orphaned", term.id, wt["path"])
         log.info("restored %d session(s), %d terminal(s), %d orphaned worktree(s)", len(self.sessions), len(self.terminals), len(self.orphans))
+        stray = console.stray_sessions(config.SESSION_PREFIX)
+        if stray:
+            log.warning(
+                "%d session(s) on the default tmux server predate Maestro's own (%s) and are not managed: %s. "
+                "Attach with `tmux attach -t <name>`, or end them with `tmux kill-session -t <name>`.",
+                len(stray), config.TMUX_SOCKET, ", ".join(stray),
+            )
         self.save()
 
     # ------------------------------------------------------------ queries
@@ -342,13 +367,24 @@ class Fleet:
         )
         worker.start()
         if wait:
-            worker.join(config.INIT_TIMEOUT + 30)
+            # Behind a queue of other starts, this one is not late until its own
+            # turn has come and gone.
+            with self._lock:
+                ahead = sum(1 for t in self.terminals.values() if not t.ready and not t.failed and t is not term)
+            worker.join(config.INIT_TIMEOUT * (1 + ahead // config.MAX_STARTING) + 30)
             if term.failed:
                 raise InitError(term.failed)
             if not term.ready:
                 raise InitError("initialisation is still running")
 
     def _initialize(self, term: Terminal, profile, initial_message, orchestration_type, sender_id):
+        # Starts are staggered, never capped: with two orchestrators launching
+        # at once, twenty Claudes booting together is what stalls tmux and every
+        # screen read for everyone. Queued starts wait their turn here.
+        with self._starting:
+            self._initialize_now(term, profile, initial_message, orchestration_type, sender_id)
+
+    def _initialize_now(self, term: Terminal, profile, initial_message, orchestration_type, sender_id):
         try:
             claude.ensure_no_bypass_dialog()
             claude.ensure_trusted(term.cwd)
@@ -792,11 +828,21 @@ class Fleet:
         if not console.pane_alive(term.pane):
             if not term.ready:  # restart_terminal is swapping the pane
                 return
-            log.warning("terminal %s: pane vanished", term.id)
-            try:
-                self.delete_terminal(term.id)
-            except KeyError:
-                pass
+            if term.failed == HOST_DIED:
+                return  # already reported; nothing to read until it is restarted
+            # The window went away under us: the tmux server was killed, or
+            # someone closed it by hand. Deleting the terminal here used to
+            # throw away its id, its inbox and its worktree record along with
+            # it; kept as an error, `restart_terminal` brings it back with all
+            # three, and `needs_attention` says what happened.
+            log.warning("terminal %s: pane vanished (%s)", term.id, HOST_DIED)
+            with self._lock:
+                term.failed = HOST_DIED
+                term.status = "error"
+                term.last_active = now_iso()
+                term.waiting_since, term.stuck = None, False
+            events.log.emit("terminal_error", term.id, term.session, agent_name=term.agent_profile, reason=HOST_DIED)
+            self.save()
             return
         screen = console.capture(term.pane, 60)
         if claude.REWIND in "\n".join(claude.rows_of(screen)[-20:]):

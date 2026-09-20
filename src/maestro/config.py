@@ -20,6 +20,7 @@ DEFAULTS = {
     "session_prefix": "mx-",
     "extra_path": [],
     "backend": "auto",
+    "shared_mcp": "",
 }
 
 # key -> (environment variable, type). extra_path takes os.pathsep-separated dirs.
@@ -33,6 +34,7 @@ ENV = {
     "session_prefix": ("MAESTRO_SESSION_PREFIX", str),
     "extra_path": ("MAESTRO_EXTRA_PATH", list),
     "backend": ("MAESTRO_BACKEND", str),
+    "shared_mcp": ("MAESTRO_SHARED_MCP", str),
 }
 
 CONFIG_TEMPLATE = """\
@@ -65,6 +67,13 @@ extra_path = []
 # What hosts each session: "tmux" (Linux, macOS, WSL), "conpty" (Windows'
 # own pseudo-console), or "auto" to pick by platform.
 backend = "auto"
+
+# MCP servers every agent gets, on top of the ones its profile names: a file in
+# Claude Code's own format, {"mcpServers": {...}}. Empty means ~/.maestro/mcp.json
+# when that exists. `maestro mcp import` fills it from your own Claude Code
+# configuration; agents run with --strict-mcp-config, so what is not in here or
+# in the profile does not exist for them.
+shared_mcp = ""
 """
 
 
@@ -154,6 +163,10 @@ TICK = float(_values["tick"])
 STUCK_AFTER = float(_values["stuck_after"])
 
 EXTRA_PATH = list(_values["extra_path"])
+
+# Servers shared with every agent. A path in config wins; otherwise the file in
+# MAESTRO_HOME is used when it is there, so `maestro mcp import` is enough.
+SHARED_MCP = Path(_values["shared_mcp"]).expanduser() if _values["shared_mcp"] else HOME / "mcp.json"
 
 # tmux keeps sessions alive across a server restart and exists wherever a POSIX
 # system is; Windows has no tmux, so there each session gets a ConPTY of its own.

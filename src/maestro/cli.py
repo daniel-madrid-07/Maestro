@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -438,6 +439,86 @@ def cmd_init(args) -> int:
     return status
 
 
+# ---------------------------------------------------------------- shared MCP
+
+
+def read_shared_mcp() -> dict:
+    try:
+        data = json.loads(config.SHARED_MCP.read_text(encoding="utf-8"))
+        return data.get("mcpServers") or {}
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
+
+
+def claude_code_mcp(path: Path) -> dict:
+    """The MCP servers Claude Code has at user scope, from its own config."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return servers if isinstance(servers, dict) else {}
+
+
+def cmd_mcp(args) -> int:
+    """Show, or fill in, the MCP servers every agent gets.
+
+    Agents run with --strict-mcp-config: whatever is not here (or named by
+    their profile) does not exist for them. Sharing your own servers is what
+    lets a worker drive a browser, read an issue or fetch a page.
+    """
+    shared = read_shared_mcp()
+    if args.action == "list":
+        if not shared:
+            _say(f"No shared MCP servers ({config.SHARED_MCP} is empty or missing).",
+                 "Add some with `maestro mcp import`.")
+            return 0
+        _say(f"{config.SHARED_MCP}:")
+        for name, spec in sorted(shared.items()):
+            command = spec.get("command", spec.get("url", "")) if isinstance(spec, dict) else str(spec)
+            _say(f"  {name:<22} {command}")
+        return 0
+
+    source = Path(args.source).expanduser() if args.source else CLAUDE_JSON
+    found = claude_code_mcp(source)
+    if not found:
+        _say(f"No MCP servers found in {source}.")
+        return 1
+    wanted = [n.strip() for n in args.only.split(",")] if args.only else list(found)
+    unknown = [n for n in wanted if n not in found]
+    if unknown:
+        _say(f"Not in {source}: {', '.join(unknown)}", f"Available: {', '.join(sorted(found))}")
+        return 1
+
+    # Maestro's own control server is left out on purpose: a worker holding it
+    # could launch and kill sessions, including the one asking it to.
+    skipped = [n for n in wanted if "maestro-ops" in json.dumps(found[n]) or "cao-ops" in json.dumps(found[n])]
+    picked = {n: found[n] for n in wanted if n not in skipped}
+    merged = picked if args.replace else {**shared, **picked}
+    config.ensure_dirs()
+    config.SHARED_MCP.write_text(json.dumps({"mcpServers": merged}, indent=2), encoding="utf-8")
+    try:
+        config.SHARED_MCP.chmod(0o600)
+    except OSError:
+        pass
+    _say(f"{config.SHARED_MCP}: {len(merged)} server(s) shared with every agent",
+         "  " + ", ".join(sorted(merged)) if merged else "  (none)")
+    if skipped:
+        _say(f"Skipped (they would let an agent drive the fleet): {', '.join(skipped)}")
+    # An agent runs where the server runs. Servers taken from a Windows Claude
+    # Code are Windows commands, and a fleet inside WSL cannot run them: Claude
+    # would start, fail to connect, and the tools would silently not be there.
+    if sys.platform != "win32":
+        windows_only = [n for n in picked
+                        if re.search(r"[A-Za-z]:\\\\|\.exe\b|^cmd(\.exe)?$", json.dumps(picked[n]))]
+        if windows_only:
+            _say("", "These look like Windows commands, and this fleet runs on "
+                     f"{platform.system()}: {', '.join(windows_only)}",
+                 "Install their Linux equivalents here, or drop them from the file.")
+    _say("", "Running sessions keep what they started with; new ones get this.")
+    return 0
+
+
 # ---------------------------------------------------------------- doctor
 
 
@@ -525,6 +606,13 @@ def checks() -> list[tuple[str, str, str, str]]:
     else:
         add("warn", "mcp", "maestro not registered with Claude Code", "run `maestro init`")
 
+    shared = read_shared_mcp()
+    if shared:
+        add("ok", "shared mcp", f"{len(shared)} server(s) for every agent: {', '.join(sorted(shared))}")
+    else:
+        add("ok", "shared mcp", "none (agents get only their profile's servers)",
+            "`maestro mcp import` shares your own Claude Code servers with them")
+
     if (SKILL_DIR / "SKILL.md").exists():
         add("ok", "skill", str(SKILL_DIR / "SKILL.md"))
     else:
@@ -568,6 +656,13 @@ def parser() -> argparse.ArgumentParser:
     up = sub.add_parser("up", help="start the server and open the panel")
     up.add_argument("--no-open", action="store_true", help="do not open the browser")
     up.add_argument("--foreground", action="store_true", help="run attached; Ctrl-C stops it")
+
+    mcpp = sub.add_parser("mcp", help="the MCP servers shared with every agent")
+    mcpp.add_argument("action", choices=["list", "import"], help="show them, or take them from Claude Code")
+    mcpp.add_argument("--source", metavar="FILE", help="where to import from (default: ~/.claude.json)")
+    mcpp.add_argument("--only", metavar="A,B", help="import just these servers")
+    mcpp.add_argument("--replace", action="store_true", help="replace what is shared instead of adding to it")
+    mcpp.set_defaults(func=cmd_mcp)
     up.set_defaults(func=cmd_up)
 
     sub.add_parser("down", help="stop the server started by `up` (sessions keep running)").set_defaults(func=cmd_down)

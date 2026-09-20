@@ -248,6 +248,123 @@ def restart_terminal(terminal_id: str) -> dict[str, Any]:
         return _fail("Restart terminal", exc)
 
 
+@mcp.tool()
+def fleet_status() -> dict[str, Any]:
+    """The whole fleet in one call: every session, every terminal, and who needs you.
+
+    Prefer this over list_sessions plus a get_session_info per session: it is
+    one call and one block of context instead of one per session. Each terminal
+    carries status, progress, stuck, model, profile, working directory,
+    worktree and pending_messages. ``needs_attention`` is the part to act on --
+    terminals that are waiting on an answer, stuck, or failed. ``totals`` counts
+    them by status.
+    """
+    try:
+        return {"success": True, **request("GET", "/fleet")}
+    except ApiError as exc:
+        return _fail("Fleet status", exc)
+
+
+@mcp.tool()
+def wait_for(
+    terminal_ids: list[str] | None = None,
+    states: list[str] | None = None,
+    timeout_seconds: float = 300,
+    require_all: bool = False,
+) -> dict[str, Any]:
+    """Block until a terminal finishes, asks something or dies -- instead of polling.
+
+    Returns as soon as one watched terminal reaches one of ``states``
+    (default: completed, waiting_user_answer, error -- ``stuck`` is also
+    available), or when ``timeout_seconds`` runs out (max 900). With
+    ``require_all`` it waits for every watched terminal instead of the first.
+    ``terminal_ids`` defaults to the whole fleet. A terminal with a message
+    still queued counts as busy, not finished.
+
+    This is the loop to use while a fleet runs: wait, act on what came back
+    (read its output, answer its question, restart it), wait again. Polling
+    get_terminal_status in a loop costs a call and a turn every few seconds
+    and tells you nothing in between.
+    """
+    try:
+        res = request(
+            "POST", "/wait",
+            body={"terminal_ids": terminal_ids, "states": states,
+                  "timeout": timeout_seconds, "require_all": require_all},
+            timeout=min(float(timeout_seconds), 900) + 30,
+        )
+    except ApiError as exc:
+        return _fail("Wait", exc)
+    return {"success": True, **res}
+
+
+@mcp.tool()
+def launch_sessions(sessions: list[dict[str, Any]], max_parallel: int = 4) -> dict[str, Any]:
+    """Launch several sessions at once, in parallel. One call for a whole fleet.
+
+    Each entry takes the same fields as launch_session: ``agent_profile``,
+    ``session_name``, ``working_directory``, ``model``, ``initial_message``,
+    ``use_worktree``. Every launch still blocks until its Claude is ready, so a
+    failure is reported against its own entry and the rest still start;
+    ``max_parallel`` (1-8) caps how many start at the same time.
+
+    Ten sessions launched one by one cost ten calls and several minutes of
+    waiting; this is one call and about as long as the slowest one.
+    """
+    if not sessions:
+        return {"success": False, "message": "sessions must not be empty"}
+    try:
+        res = request("POST", "/sessions/batch",
+                      body={"sessions": sessions, "max_parallel": max_parallel},
+                      timeout=config.INIT_TIMEOUT * 2 + 120)
+    except ApiError as exc:
+        return _fail("Launch sessions", exc)
+    results = res["results"]
+    started = [r for r in results if r.get("success")]
+    return {
+        "success": bool(started),
+        "message": f"{len(started)} of {len(results)} sessions launched",
+        "results": results,
+    }
+
+
+@mcp.tool()
+def broadcast_message(
+    message: str,
+    terminal_ids: list[str] | None = None,
+    session_names: list[str] | None = None,
+) -> dict[str, Any]:
+    """Queue one message for many terminals at once (the whole fleet when none is named).
+
+    For the things you say to everyone: a change of plan, "commit what you have
+    and report", a constraint you forgot. Each terminal receives it when it is
+    next idle, exactly as send_session_message does.
+    """
+    try:
+        res = request("POST", "/broadcast",
+                      body={"message": message, "terminal_ids": terminal_ids,
+                            "session_names": session_names, "sender_id": "maestro-ops"})
+    except ApiError as exc:
+        return _fail("Broadcast", exc)
+    return {"success": True, "message": f"Queued for {res['delivered']} terminal(s)", **res}
+
+
+@mcp.tool()
+def get_usage() -> dict[str, Any]:
+    """How much of the Claude subscription is left: the 5-hour and weekly windows.
+
+    Worth a look before opening a large fleet, and when deciding whether to run
+    the stronger model everywhere. Percentages are utilisation, so 100 means
+    spent; ``resets_at`` says when the window rolls over. Unavailable (no local
+    credentials, or the endpoint refused) comes back as ok: false rather than a
+    made-up number.
+    """
+    try:
+        return {"success": True, **request("GET", "/usage")}
+    except ApiError as exc:
+        return _fail("Get usage", exc)
+
+
 def main() -> None:
     mcp.run()
 

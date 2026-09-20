@@ -43,6 +43,7 @@ Knowing what an agent is doing is the hard part, and Maestro does it the way a p
   <img src="docs/panel-hover-agent.png" alt="Hovering an agent shows the percentage it last reported" width="420">
 
 - **Survives a restart** — on Linux and macOS the server re-adopts the tmux sessions that are still alive; everywhere it keeps a note of worktrees whose agent is gone so their work can still be merged
+- **Agents that can reach further** — `maestro mcp import` shares the MCP servers from your own Claude Code with every agent, so a worker can drive a browser or read an issue instead of only editing files. They run with `--strict-mcp-config`, so they get exactly what you share and nothing else
 - **Small enough to read** — under 4,000 lines of Python, two dependencies (four on Windows), no database, no web framework
 
 ## Installation / Usage
@@ -99,6 +100,7 @@ Claude launches the fleet, and you watch it on <http://127.0.0.1:9889>.
 | `maestro open` | open the panel (on Windows, in a window of its own) |
 | `maestro down` | stop the server; with tmux the sessions stay up, on Windows they end with it |
 | `maestro init` | set up `~/.maestro`, the profiles, the skill, the scout subagent and the MCP registration (`--force`) |
+| `maestro mcp list` / `import` | the MCP servers every agent gets, taken from your own Claude Code if you like |
 
 ### Requirements
 
@@ -116,7 +118,7 @@ An agent profile is a Markdown file with YAML front matter: model, effort, MCP s
 ## Architecture
 
 - **`maestro-server`** — the HTTP API. Owns the terminals (tmux sessions, or ConPTYs on Windows), starts Claude in each one, reads every screen once a second to classify its state, delivers queued messages when an agent is free, streams events over SSE, and serves the panel.
-- **`maestro-ops`** — the MCP server the outside orchestrator (Claude Code in your editor) talks to, registered as `maestro`: `launch_session`, `send_session_message`, `read_session_output`, `get_terminal_status`, `get_terminal_output`, `answer_prompt`, `interrupt`, `restart_terminal`, `list_sessions`, `get_session_info`, `list_profiles`, `get_profile_details`, `list_worktrees`, `remove_worktree`, `shutdown_session`.
+- **`maestro-ops`** — the MCP server the outside orchestrator (Claude Code in your editor) talks to, registered as `maestro`: `fleet_status` (everything at once, plus who needs answering), `wait_for` (blocks until a worker finishes, asks or dies, instead of polling), `launch_sessions` (a whole fleet in one parallel call), `launch_session`, `broadcast_message`, `get_usage`, `send_session_message`, `read_session_output`, `get_terminal_status`, `get_terminal_output`, `answer_prompt`, `interrupt`, `restart_terminal`, `list_sessions`, `get_session_info`, `list_profiles`, `get_profile_details`, `list_worktrees`, `remove_worktree`, `shutdown_session`.
 - **`maestro-agent`** — the MCP server every launched session gets, so agents can build their own sub-fleets: `assign`, `handoff`, `send_message`, `report_progress`, `list_terminals`, `get_terminal_status`, `get_terminal_output`, `answer_prompt`, `interrupt`, `restart_terminal`, `delete_terminal`.
 - **The panel** — a single HTML file served by the server: canvas for the field and the wires, DOM for the labels, SSE for the traffic.
 

@@ -8,6 +8,7 @@ against real TUI builds; they are kept deliberately narrow.
 """
 
 import json
+import logging
 import os
 import re
 import stat
@@ -17,6 +18,8 @@ from pathlib import Path
 
 from maestro import config, tmux
 from maestro.profiles import Profile
+
+log = logging.getLogger("maestro.claude")
 
 # ---------------------------------------------------------------- patterns
 
@@ -273,6 +276,25 @@ def build_command(
     return tmux.UNSET_CLAUDE_ENV + tmux.quote(launch_argv(profile, model, prompt_file, mcp_file))
 
 
+def shared_mcp_servers() -> dict:
+    """MCP servers the owner shares with every agent, from ``config.SHARED_MCP``.
+
+    Agents run with ``--strict-mcp-config``: they see these and whatever their
+    profile names, and nothing else on the machine. A broken or missing file is
+    not fatal -- the fleet still runs, with the profile's own servers.
+    """
+    path = config.SHARED_MCP
+    try:
+        if not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("shared MCP config %s ignored: %s", path, exc)
+        return {}
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return servers if isinstance(servers, dict) else {}
+
+
 def write_launch_files(terminal_id: str, profile: Profile) -> tuple[Path, Path | None]:
     """Persist the system prompt and the MCP config Claude reads at start."""
     config.ensure_dirs()
@@ -280,10 +302,13 @@ def write_launch_files(terminal_id: str, profile: Profile) -> tuple[Path, Path |
     prompt_file.write_text(profile.system_prompt or "", encoding="utf-8")
     prompt_file.chmod(0o600)
 
-    if not profile.mcp_servers:
+    # The profile's own servers win: a profile that names a server is being
+    # specific about it, and the shared file is a default for everyone.
+    wanted = {**shared_mcp_servers(), **(profile.mcp_servers or {})}
+    if not wanted:
         return prompt_file, None
     servers: dict = {}
-    for name, spec in profile.mcp_servers.items():
+    for name, spec in wanted.items():
         spec = dict(spec) if isinstance(spec, dict) else {"command": str(spec)}
         command = spec.get("command", "")
         # The agent bridge is resolved to its absolute script so the pane's PATH

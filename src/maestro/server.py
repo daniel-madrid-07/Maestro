@@ -288,6 +288,30 @@ class Handler(BaseHTTPRequestHandler):
         if head == "health" and method == "GET":
             return self._json(200, {"ok": True, "maestro": True, "version": __version__, "sessions": len(fleet.sessions), "terminals": len(fleet.terminals)})
 
+        if segs == ["fleet"] and method == "GET":
+            return self._json(200, fleet.snapshot())
+
+        # Long-polled: it answers the moment something settles, so an
+        # orchestrator waits instead of asking again every few seconds.
+        if segs == ["wait"] and method == "POST":
+            p = self._params()
+            ids = p.get("terminal_ids")
+            states = p.get("states")
+            if ids is not None and not isinstance(ids, list):
+                raise ValueError("terminal_ids must be a list")
+            if states is not None and not isinstance(states, list):
+                raise ValueError("states must be a list")
+            return self._json(200, fleet.wait_for(
+                ids, states, float(p.get("timeout", 300)), _truthy(p.get("require_all", "false"))))
+
+        if segs == ["broadcast"] and method == "POST":
+            p = self._params()
+            if not p.get("message"):
+                raise ValueError("message is required")
+            sent = fleet.broadcast(p["message"], p.get("terminal_ids"), p.get("session_names"),
+                                   p.get("sender_id"))
+            return self._json(200, {"delivered": len(sent), "terminals": sent})
+
         if segs == ["usage"] and method == "GET":
             return self._json(200, read_usage())
 
@@ -312,6 +336,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {**p.summary(), "system_prompt": p.system_prompt, "mcpServers": p.mcp_servers})
 
         if head == "sessions":
+            if segs == ["sessions", "batch"] and method == "POST":
+                p = self._params()
+                specs = p.get("sessions")
+                if not isinstance(specs, list) or not specs:
+                    raise ValueError("sessions must be a non-empty list")
+                if len(specs) > 40:
+                    raise ValueError("at most 40 sessions per batch")
+                return self._json(200, {"results": fleet.create_many(specs, int(p.get("max_parallel", 4)))})
+
             if len(segs) == 1:
                 if method == "GET":
                     return self._json(200, fleet.list_sessions())

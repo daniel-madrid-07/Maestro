@@ -13,9 +13,13 @@ every session in the panel (`maestro open`, by default http://127.0.0.1:9889/).
 
 ## 0. Make sure the server is up
 
-Call `list_sessions`. If it reports that maestro-server is not reachable, run
+Call `fleet_status`. If it reports that maestro-server is not reachable, run
 `maestro up --no-open` in a shell and call it again. If that fails, run
 `maestro doctor` and show the user the lines that are not `ok`.
+
+`fleet_status` is also how you check on a fleet you did not start: it returns
+every session and terminal at once, with `needs_attention` listing whoever is
+waiting on an answer, stuck or failed.
 
 ## 1. Understand, then split
 
@@ -25,7 +29,9 @@ them one unit, sequence them, or give each its own worktree (below).
 
 ## 2. Launch
 
-`launch_session` once per unit:
+`launch_sessions` takes a list and starts them in parallel -- one call for the
+whole fleet, and the time of the slowest one instead of the sum. `launch_session`
+does the same for a single unit; both take the same fields:
 
 - `agent_profile`: `"worker"` for implementation, `"reviewer"` for review
   passes, `"code_supervisor"` when a sub-tree needs its own manager (it
@@ -43,7 +49,11 @@ them one unit, sequence them, or give each its own worktree (below).
 - `use_worktree`: see "several workers on one repository".
 
 Launching blocks until the session shows its input box, so a failed start is
-reported right there.
+reported right there -- per entry, when launching a batch: one bad directory
+does not stop the others.
+
+Before opening a large fleet, `get_usage` says how much of the subscription
+window is left (the panel shows the same figures).
 
 **There is no maximum number of sessions.** Open as many as the work genuinely
 splits into; never settle for fewer because it "seems enough". The only limits
@@ -51,6 +61,17 @@ are the machine and the user's plan; delete finished sessions as you go.
 
 ## 3. Drive to completion
 
+**Wait, do not poll.** `wait_for(...)` blocks until a worker finishes, asks a
+question, or dies, and returns the moment one does (`timeout_seconds`, up to
+900; `require_all=true` waits for the slowest instead of the first). The loop
+is: `wait_for` → act on what came back → `wait_for` again. Asking
+`get_terminal_status` every few seconds costs a call and a turn each time and
+tells you nothing in between.
+
+- `fleet_status()`: everything at once, and `needs_attention` for who wants you.
+- `broadcast_message(message, ...)`: one message to the whole fleet, or to the
+  terminals or sessions you name -- a change of plan, or "commit what you have
+  and report".
 - `get_terminal_status(terminal_id)`: `idle`, `processing`, `completed`,
   `waiting_user_answer` or `error`, plus `progress` (the percentage and note
   each worker reports with its own `report_progress` tool; the profiles ask

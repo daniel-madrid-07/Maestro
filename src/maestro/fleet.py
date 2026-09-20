@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -441,6 +442,134 @@ class Fleet:
         with self._lock:
             term.inbox.append({"message": text, "sender_id": sender_id, "orchestration_type": orchestration_type})
             return len(term.inbox)
+
+    # ------------------------------------------------------------ the whole fleet
+
+    # An orchestrator asks the same three questions all day: what is running,
+    # who needs me, and is anyone done yet. Answering them one session at a
+    # time costs a call and a chunk of context each; these answer them whole.
+
+    SETTLED = ("completed", "waiting_user_answer", "error")
+
+    def snapshot(self) -> dict:
+        """Every session and terminal, plus who is waiting on the orchestrator."""
+        with self._lock:
+            terms = sorted((t.public() for t in self.terminals.values()), key=lambda t: t["created"])
+            sessions = [
+                {
+                    "name": s.name,
+                    "working_directory": s.cwd,
+                    "created": s.created,
+                    "terminals": [t["id"] for t in terms if t["session_name"] == s.name],
+                }
+                for s in self.sessions.values()
+            ]
+        by_status: dict[str, int] = {}
+        for t in terms:
+            state = "stuck" if t.get("stuck") else (t.get("status") or "unknown")
+            by_status[state] = by_status.get(state, 0) + 1
+        return {
+            "sessions": sessions,
+            "terminals": terms,
+            "totals": {"sessions": len(sessions), "terminals": len(terms), "by_status": by_status},
+            # The point of the whole call: a worker cannot ask for you, so this
+            # is where an unanswered question or a dead session surfaces.
+            "needs_attention": [
+                {
+                    "terminal_id": t["id"],
+                    "session_name": t["session_name"],
+                    "why": "stuck" if t.get("stuck") else t["status"],
+                    "waiting_since": t.get("waiting_since"),
+                }
+                for t in terms
+                if t.get("stuck") or t.get("status") in ("waiting_user_answer", "error")
+            ],
+        }
+
+    def wait_for(self, terminal_ids=None, states=None, timeout: float = 300.0,
+                 require_all: bool = False) -> dict:
+        """Block until terminals reach one of ``states``, or the timeout runs out.
+
+        This is what replaces polling: the caller asks once and is answered the
+        moment a worker finishes, asks a question or dies, instead of spending a
+        call and a turn every few seconds to find out.
+        """
+        wanted = tuple(states or self.SETTLED)
+        started = time.monotonic()
+        deadline = started + max(1.0, min(float(timeout), 900.0))
+        while True:
+            with self._lock:
+                unknown = [i for i in (terminal_ids or []) if i not in self.terminals]
+                watched = [t for t in self.terminals.values()
+                           if not terminal_ids or t.id in terminal_ids]
+                ready, pending = [], []
+                for t in watched:
+                    state = "stuck" if (t.stuck and t.status == "processing") else t.status
+                    row = {
+                        "terminal_id": t.id, "session_name": t.session, "status": state,
+                        "stuck": bool(t.stuck), "pending_messages": len(t.inbox),
+                    }
+                    # A queued message it has not read yet is work it has not
+                    # started: "completed" there means the previous turn.
+                    (ready if (state in wanted and not t.inbox) else pending).append(row)
+            hit = (bool(watched) and not pending) if require_all else bool(ready)
+            if hit or not watched or time.monotonic() >= deadline:
+                return {
+                    "matched": ready, "pending": pending, "unknown": unknown,
+                    "timed_out": not hit,
+                    "waited_seconds": round(time.monotonic() - started, 1),
+                }
+            time.sleep(0.4)
+
+    def create_many(self, specs: list[dict], max_parallel: int = 4) -> list[dict]:
+        """Launch several sessions in parallel; one result per spec, in order.
+
+        Sequential launches cost the caller a call and ~10-30 s each, so ten
+        workers took minutes to even exist. Each still blocks until its Claude
+        is ready, so a failure is still reported against its own spec.
+        """
+        def one(spec: dict) -> dict:
+            name = spec.get("session_name") or f"s-{os.urandom(3).hex()}"
+            try:
+                term = self.create_terminal(
+                    name,
+                    spec.get("agent_profile") or "worker",
+                    spec.get("working_directory"),
+                    model=spec.get("model"),
+                    initial_message=spec.get("initial_message"),
+                    orchestration_type="launch",
+                    sender_id=spec.get("sender_id") or "maestro-ops",
+                    wait=True,
+                    use_worktree=bool(spec.get("use_worktree")),
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad spec must not sink the batch
+                log.warning("batch launch of %s failed: %s", name, exc)
+                return {"success": False, "session_name": name, "terminal_id": None,
+                        "message": f"{type(exc).__name__}: {exc}"}
+            return {"success": True, "session_name": term.session, "terminal_id": term.id,
+                    "worktree": term.worktree.public() if term.worktree else None}
+
+        if not specs:
+            return []
+        width = max(1, min(int(max_parallel or 4), 8))
+        with ThreadPoolExecutor(max_workers=width, thread_name_prefix="batch") as pool:
+            return list(pool.map(one, specs))
+
+    def broadcast(self, message: str, terminal_ids=None, session_names=None,
+                  sender_id=None) -> list[dict]:
+        """Queue one message for many terminals (all of them, when nothing is named)."""
+        with self._lock:
+            targets = [
+                t for t in self.terminals.values()
+                if (not terminal_ids and not session_names)
+                or (terminal_ids and t.id in terminal_ids)
+                or (session_names and t.session in session_names)
+            ]
+        out = []
+        for t in targets:
+            out.append({"terminal_id": t.id, "session_name": t.session,
+                        "queued": self.queue_message(t.id, message, sender_id, "broadcast")})
+        return out
 
     def output(self, terminal_id: str, mode: str = "full") -> dict:
         term = self.get_terminal(terminal_id)

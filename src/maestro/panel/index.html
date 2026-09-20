@@ -141,6 +141,10 @@
     pointer-events: none;
   }
 
+  /* A label above its own glyph grows upwards: hanging it below would drop the
+     line onto the glyph, and on the topmost node onto the mark behind it. */
+  .tag[data-above="1"] .tag__under { top: auto; bottom: 100%; }
+
   .tag__title,
   .tag__meter {
     display: block;
@@ -152,6 +156,11 @@
     transition: opacity var(--dur-base) var(--ease-out),
                 transform var(--dur-base) var(--ease-out);
   }
+
+  /* And it rises from below rather than dropping from above, so the movement
+     always goes the way the text is going. */
+  .tag[data-above="1"] .tag__title,
+  .tag[data-above="1"] .tag__meter { transform: translateY(4px); }
 
   .tag[data-titled="1"] .tag__title,
   .tag[data-hover="1"] .tag__meter { opacity: 1; transform: none; }
@@ -1570,6 +1579,10 @@
     const ux = n.x - cx, uy = n.y - cy;
     const ul = Math.hypot(ux, uy) || 1;
     const dx = ux / ul, dy = uy / ul;
+    // Which side of its glyph this label sits on, so what it reveals opens
+    // away from the field rather than across it.
+    const above = dy < -0.15 ? '1' : '0';
+    if (n.el.dataset.above !== above) n.el.dataset.above = above;
     const w = n.el.offsetWidth, h = n.el.offsetHeight;
     const push = TAG_CLEAR + Math.abs(dx) * (w / 2) + Math.abs(dy) * (h / 2);
     const x = Math.max(8, Math.min(W - w - 8, n.x + dragPull + dx * push - w / 2));

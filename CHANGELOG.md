@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Added
+
+- **`fleet_status`**: every session and terminal in one call, with
+  `needs_attention` naming whoever is waiting on an answer, stuck or failed.
+  It replaces `list_sessions` plus a `get_session_info` per session.
+- **`wait_for`**: blocks until a worker finishes, asks a question or dies (or
+  the timeout runs out), so an orchestrator waits instead of polling
+  `get_terminal_status` every few seconds -- a call and a turn each time.
+- **`launch_sessions`**: a whole fleet in one call, started in parallel. Ten
+  workers took ten calls and several minutes to exist; now it takes one call
+  and about as long as the slowest one. A bad entry fails on its own.
+- **`broadcast_message`**: one message to the whole fleet, or to the terminals
+  or sessions you name.
+- **`get_usage`**: how much of the subscription's five-hour and weekly windows
+  is left, for deciding how large a fleet to open.
+- **Shared MCP servers.** Agents run with `--strict-mcp-config` and used to
+  get only Maestro's own bridge, so a worker could edit files and nothing
+  else. `maestro mcp import` copies the servers from your own Claude Code into
+  `~/.maestro/mcp.json` (Maestro's own control server is skipped: a worker
+  holding it could drive the fleet), and every new agent gets them on top of
+  whatever its profile names. `maestro mcp list` shows what they have, and
+  `maestro doctor` counts them.
+
 ### Changed
 
 - **The panel shows one project at a time.** Two projects at once used to put
